@@ -257,6 +257,7 @@ def test_settings(tmp_path) -> Settings:
         log_level="WARNING",
         universe_size=20,
         candle_fetch_limit=300,
+        candle_fetch_limit_long=300,  # FakeReferenceAdapter mirrors 300-candle exchange history
         candle_min_history=210,
     )
 
@@ -300,3 +301,97 @@ class FakeReferenceAdapter:
         closed = [c for c in candles if c.is_closed][-count:]
         return [replace(c, close=c.close * self.scale, high=c.high * self.scale, low=c.low * self.scale,
                         open=c.open * self.scale) for c in closed]
+
+
+# --------------------------------------------------------------------------- Phase 2 helpers
+
+
+def candles_from_closes(
+    closes: list[float],
+    timeframe: Timeframe = Timeframe.H4,
+    *,
+    now: datetime | None = None,
+    wick: float = 0.004,
+    volumes: list[float] | None = None,
+    symbol: str = "TESTUSDT",
+    source: str = "fake",
+) -> list[Candle]:
+    """Closed candles ending at the last fully closed interval; each opens at the previous close."""
+    now = now or utcnow()
+    interval = timedelta(seconds=timeframe.seconds)
+    last_open = floor_to_timeframe(now, timeframe) - interval
+    first_open = last_open - interval * (len(closes) - 1)
+    out: list[Candle] = []
+    for i, close in enumerate(closes):
+        open_price = closes[i - 1] if i else close
+        open_time = first_open + interval * i
+        out.append(
+            Candle(
+                source=source,
+                symbol=symbol,
+                timeframe=timeframe,
+                open_time=open_time,
+                close_time=open_time + interval,
+                open=open_price,
+                high=max(open_price, close) * (1 + wick),
+                low=min(open_price, close) * (1 - wick),
+                close=close,
+                volume=volumes[i] if volumes else 100.0,
+                is_closed=True,
+            )
+        )
+    return out
+
+
+def zigzag(start: float, legs: list[tuple[int, float]]) -> list[float]:
+    """Closes moving `pct` percent in total over `steps` candles per leg."""
+    closes = [start]
+    for steps, pct in legs:
+        step = (1 + pct / 100.0) ** (1 / steps)
+        for _ in range(steps):
+            closes.append(closes[-1] * step)
+    return closes
+
+
+def trend_series(n: int, start: float = 100.0, drift_pct: float = 0.3, wave_pct: float = 2.0, period: int = 24) -> list[float]:
+    """Exponential drift with a sine wave on top: swings for structure, a clear trend for EMAs."""
+    return [start * (1 + drift_pct / 100.0) ** i * (1 + wave_pct / 100.0 * math.sin(2 * math.pi * i / period)) for i in range(n)]
+
+
+ANALYSIS_COUNTS = {Timeframe.D1: 300, Timeframe.H4: 400, Timeframe.H1: 400, Timeframe.M15: 300, Timeframe.M5: 300}
+
+
+def market_candles(
+    price_at,
+    *,
+    now: datetime | None = None,
+    counts: dict[Timeframe, int] | None = None,
+    wick: float = 0.002,
+    symbol: str = "TESTUSDT",
+) -> dict[Timeframe, list[Candle]]:
+    """Consistent candles on every timeframe, sampled from `price_at(hours_before_now)`.
+
+    Up candles carry more volume than down candles, like a market with buyers in control.
+    """
+    now = now or utcnow()
+    out: dict[Timeframe, list[Candle]] = {}
+    for tf, count in (counts or ANALYSIS_COUNTS).items():
+        interval = timedelta(seconds=tf.seconds)
+        last_open = floor_to_timeframe(now, tf) - interval
+        candles = []
+        for k in range(count):
+            open_time = last_open - interval * (count - 1 - k)
+            close_time = open_time + interval
+            samples = [
+                price_at((now - (open_time + interval * j / 8)).total_seconds() / 3600) for j in range(9)
+            ]
+            open_price, close_price = samples[0], samples[-1]
+            candles.append(
+                Candle(
+                    source="fake", symbol=symbol, timeframe=tf, open_time=open_time, close_time=close_time,
+                    open=open_price, high=max(samples) * (1 + wick), low=min(samples) * (1 - wick),
+                    close=close_price, volume=150.0 if close_price >= open_price else 100.0, is_closed=True,
+                )
+            )
+        out[tf] = candles
+    return out

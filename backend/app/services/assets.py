@@ -10,6 +10,8 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Sequence
+from dataclasses import dataclass
+from datetime import datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -19,7 +21,7 @@ from app.data.adapters.base import ReferenceCandleAdapter
 from app.data.http import ProviderError, ProviderPlanLimited
 from app.core.timeutil import utcnow
 from app.data.health import ProviderHealthRegistry
-from app.data.normalization.schemas import Candle, Ticker
+from app.data.normalization.schemas import Candle, ListingEntry, Ticker
 from app.data.validation.candle_reference import CandleCrossCheck, cross_validate_candles, unverified
 from app.data.validation.candles import CandleValidationReport, validate_candles
 from app.data.validation.gate import IntegrityGate, IntegrityInputs, IntegrityResult
@@ -161,6 +163,67 @@ def integrity_out(result: IntegrityResult) -> IntegrityOut:
     )
 
 
+@dataclass
+class AssetCollection:
+    """Everything collected and validated for one asset.
+
+    Input to both the detail endpoint and the Phase 2 analysis, so the two share one set
+    of provider calls.
+    """
+
+    asset: UniverseAsset
+    collected_at: datetime
+    listing: ListingInfoOut
+    closed: dict[Timeframe, list[Candle]]
+    reports: dict[Timeframe, CandleValidationReport]
+    timeframe_outputs: list[TimeframeValidationOut]
+    ticker: Ticker | None
+    ticker_market: MarketRef | None
+    book: OrderBookSummary | None
+    cross_check: CrossCheck | None
+    candle_checks: dict[Timeframe, CandleCrossCheck]
+    volatility: VolatilityCheck | None
+    integrity: IntegrityResult
+    quote_usd_rate: float | None
+    errors: list[str]
+    persistence: str
+
+
+def detail_out(c: AssetCollection) -> AssetDetailOut:
+    return AssetDetailOut(
+        generated_at=c.collected_at,
+        symbol=c.asset.symbol,
+        name=c.asset.name,
+        universe_rank=c.asset.universe_rank,
+        supported=c.asset.supported,
+        unsupported_reason=c.asset.unsupported_reason,
+        markets=_markets(c.asset),
+        listing=c.listing,
+        ticker=TickerOut.model_validate(c.ticker) if c.ticker else None,
+        order_book=OrderBookSummaryOut.model_validate(c.book) if c.book else None,
+        timeframes=c.timeframe_outputs,
+        cross_check=CrossCheckOut.model_validate(c.cross_check) if c.cross_check else None,
+        candle_cross_checks=[
+            CandleCrossCheckOut(
+                timeframe=check.timeframe.value,
+                label=check.timeframe.label,
+                status=check.status,
+                reference_source=check.reference_source,
+                compared=check.compared,
+                median_deviation_pct=check.median_deviation_pct,
+                max_deviation_pct=check.max_deviation_pct,
+                outliers=check.outliers,
+                reason=check.reason,
+            )
+            for check in sorted(c.candle_checks.values(), key=lambda x: x.timeframe.seconds)
+        ],
+        volatility=VolatilityOut.model_validate(c.volatility) if c.volatility else None,
+        integrity=integrity_out(c.integrity),
+        errors=c.errors,
+        persistence=c.persistence,
+    )
+
+
 class AssetService:
     def __init__(
         self,
@@ -183,6 +246,7 @@ class AssetService:
         self._reference = reference
         self._gate = IntegrityGate()
         self._cache = AsyncTTLCache()
+        self._collections = AsyncTTLCache(prune_expired=True)
 
     async def _asset(self, symbol: str) -> UniverseAsset:
         universe = await self._universe.get()
@@ -191,7 +255,8 @@ class AssetService:
             raise AssetNotInUniverse(symbol.upper())
         return asset
 
-    def _validate(self, tf: Timeframe, candles: list[Candle]) -> tuple[list[Candle], CandleValidationReport]:
+    def validate(self, tf: Timeframe, candles: list[Candle]) -> tuple[list[Candle], CandleValidationReport]:
+        """Validate candles with the configured fail-safe thresholds (closed candles only)."""
         return validate_candles(
             candles,
             tf,
@@ -277,7 +342,7 @@ class AssetService:
         if not asset.supported:
             raise AssetUnsupported(asset.symbol, asset.unsupported_reason or "no spot market")
         raw, market = await self._router.candles(asset.markets, timeframe, limit)
-        closed, report = self._validate(timeframe, raw)
+        closed, report = self.validate(timeframe, raw)
         forming = next((c for c in reversed(raw) if not c.is_closed), None)
         await self._store_candles(asset.symbol, {timeframe: closed})
         return CandlesOut(
@@ -296,10 +361,16 @@ class AssetService:
     # ------------------------------------------------------------------ detail endpoint
 
     async def detail(self, symbol: str) -> AssetDetailOut:
-        key = ("detail", symbol.upper())
-        return await self._cache.get_or_load(key, lambda: self._load_detail(symbol), self._s.asset_detail_cache_seconds)
+        return detail_out(await self.collect(symbol))
 
-    async def _load_detail(self, symbol: str) -> AssetDetailOut:
+    async def collect(self, symbol: str) -> AssetCollection:
+        """Collected and validated data for one asset (cached briefly, single flight)."""
+        key = ("collect", symbol.upper())
+        return await self._collections.get_or_load(
+            key, lambda: self._collect(symbol), self._s.asset_detail_cache_seconds
+        )
+
+    async def _collect(self, symbol: str) -> AssetCollection:
         asset = await self._asset(symbol)
         timeframes = sorted(set(self._s.required_timeframes) | {Timeframe.M5}, key=lambda t: t.seconds)
         errors: list[str] = []
@@ -336,7 +407,7 @@ class AssetService:
         if asset.supported:
             candle_results, ticker_result, book_result = await asyncio.gather(
                 asyncio.gather(
-                    *(self._router.candles(asset.markets, tf, self._s.candle_fetch_limit) for tf in timeframes),
+                    *(self._router.candles(asset.markets, tf, self._s.fetch_limit(tf)) for tf in timeframes),
                     return_exceptions=True,
                 ),
                 self._router.tickers({asset.symbol: asset.markets}),
@@ -365,7 +436,7 @@ class AssetService:
                     tf_outputs.append(_timeframe_out(tf, None, [], None, error=message))
                     continue
                 raw, market = outcome
-                closed, report = self._validate(tf, raw)
+                closed, report = self.validate(tf, raw)
                 reports[tf], closed_by_tf[tf], market_by_tf[tf] = report, closed, market
                 tf_outputs.append(_timeframe_out(tf, report, closed, market))
         else:
@@ -373,7 +444,13 @@ class AssetService:
             tf_outputs = [_timeframe_out(tf, None, [], None, error="no supported spot market") for tf in timeframes]
 
         candle_checks.update(await self._collect_reference(asset, reference_tasks, closed_by_tf, market_by_tf))
-        cross = await self._cross_check(asset, ticker, ticker_market)
+        try:
+            entries = {e.symbol: e for e in (await self._listing.latest()).entries}
+        except ListingUnavailable:
+            entries = {}
+        quotes = {sym: e.price_usd for sym, e in entries.items() if sym in USD_STABLE_QUOTES}
+        quote_usd_rate = quote_to_usd_rate(ticker_market.quote_asset, quotes)[0] if ticker_market else None
+        cross = self._cross_check(asset, ticker, ticker_market, entries, quotes)
         volatility: VolatilityCheck | None = (
             check_volatility(
                 closed_by_tf[Timeframe.M5],
@@ -410,51 +487,36 @@ class AssetService:
             )
 
         persistence_status = await self._store_candles(asset.symbol, closed_by_tf, book_summary)
-        return AssetDetailOut(
-            generated_at=utcnow(),
-            symbol=asset.symbol,
-            name=asset.name,
-            universe_rank=asset.universe_rank,
-            supported=asset.supported,
-            unsupported_reason=asset.unsupported_reason,
-            markets=_markets(asset),
+        return AssetCollection(
+            asset=asset,
+            collected_at=utcnow(),
             listing=listing_out,
-            ticker=TickerOut.model_validate(ticker) if ticker else None,
-            order_book=OrderBookSummaryOut.model_validate(book_summary) if book_summary else None,
-            timeframes=tf_outputs,
-            cross_check=CrossCheckOut.model_validate(cross) if cross else None,
-            candle_cross_checks=[
-                CandleCrossCheckOut(
-                    timeframe=check.timeframe.value,
-                    label=check.timeframe.label,
-                    status=check.status,
-                    reference_source=check.reference_source,
-                    compared=check.compared,
-                    median_deviation_pct=check.median_deviation_pct,
-                    max_deviation_pct=check.max_deviation_pct,
-                    outliers=check.outliers,
-                    reason=check.reason,
-                )
-                for check in sorted(candle_checks.values(), key=lambda c: c.timeframe.seconds)
-            ],
-            volatility=VolatilityOut.model_validate(volatility) if volatility else None,
-            integrity=integrity_out(result),
+            closed=closed_by_tf,
+            reports=reports,
+            timeframe_outputs=tf_outputs,
+            ticker=ticker,
+            ticker_market=ticker_market,
+            book=book_summary,
+            cross_check=cross,
+            candle_checks=candle_checks,
+            volatility=volatility,
+            integrity=result,
+            quote_usd_rate=quote_usd_rate,
             errors=errors,
             persistence=persistence_status,
         )
 
-    async def _cross_check(
-        self, asset: UniverseAsset, ticker: Ticker | None, market: MarketRef | None
+    def _cross_check(
+        self,
+        asset: UniverseAsset,
+        ticker: Ticker | None,
+        market: MarketRef | None,
+        entries: dict[str, ListingEntry],
+        quotes: dict[str, float],
     ) -> CrossCheck | None:
         if ticker is None or market is None:
             return None
-        try:
-            listing = await self._listing.latest()
-            entries = {e.symbol: e for e in listing.entries}
-        except ListingUnavailable:
-            entries = {}
         reference = entries.get(asset.symbol, asset.listing)
-        quotes = {s: e.price_usd for s, e in entries.items() if s in USD_STABLE_QUOTES}
         rate, _ = quote_to_usd_rate(market.quote_asset, quotes)
         now = utcnow()
         return cross_validate_price(

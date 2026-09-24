@@ -8,7 +8,20 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from app.config import Settings
 from app.database import create_session_factory
 from app.main import create_app
-from app.models import Asset, Base, Candle, MarketSnapshot, OrderbookSnapshot, ProviderHealthRecord, SystemEvent
+from app.core.enums import Timeframe
+from app.models import (
+    Asset,
+    Base,
+    Candle,
+    MarketRegime,
+    MarketSnapshot,
+    OrderbookSnapshot,
+    ProviderHealthRecord,
+    Signal,
+    SignalTarget,
+    SystemEvent,
+    TechnicalFeature,
+)
 from app.services.container import build_container
 from tests.conftest import (
     FakeAltcoinSeasonAdapter,
@@ -136,6 +149,27 @@ async def test_provider_health_endpoint(client):
     assert "providers" in r and r["live_stream"]["running"] is False
 
 
+async def test_dashboard_page_and_assets(client):
+    http, _ = client
+    r = await http.get("/")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/html")
+    assert "script-src 'self'" in r.headers["content-security-policy"]
+    assert "__VERSION__" not in r.text
+    assert "/static/dashboard.js?v=" in r.text and "/static/dashboard.css?v=" in r.text
+    assert (await http.head("/")).status_code == 200
+    js = await http.get("/static/dashboard.js")
+    assert js.status_code == 200 and "/api/market" in js.text
+    assert (await http.get("/static/dashboard.css")).status_code == 200
+    assert (await http.get("/static/missing.js")).status_code == 404
+
+
+async def test_api_index(client):
+    http, _ = client
+    body = (await http.get("/api")).json()
+    assert body["dashboard"] == "/" and body["health"] == "/health" and "/api/market" in body["endpoints"]
+
+
 async def test_all_exchanges_down_returns_explicit_api_failure(sqlite_env):
     settings, engine = sqlite_env
     app, _ = await _make_client(settings, engine, spot=[FakeSpotAdapter("a", fail=True)])
@@ -152,7 +186,8 @@ async def test_postgres_end_to_end(tmp_path):
     settings = Settings(_env_file=None, database_url=os.environ["TEST_DATABASE_URL"], json_logs=False)
     engine = create_async_engine(settings.async_database_url, connect_args=settings.database_connect_args)
     async with engine.begin() as conn:
-        for table in ("candles", "market_snapshots", "orderbook_snapshots", "system_events", "provider_health", "assets"):
+        for table in ("candles", "market_snapshots", "orderbook_snapshots", "system_events", "provider_health", "assets",
+                      "signal_targets", "signals", "technical_features", "market_regimes"):
             await conn.exec_driver_sql(f"DELETE FROM {table}")
     app, sessions = await _make_client(settings, engine)
     async with app.router.lifespan_context(app):
@@ -162,10 +197,23 @@ async def test_postgres_end_to_end(tmp_path):
             assert (await http.get("/api/assets/SOL")).json()["persistence"] == "ok"
             # upsert on the real unique constraint
             assert (await http.get("/api/assets/SOL/candles", params={"timeframe": "5m"})).status_code == 200
+            # Phase 2: JSONB features/signals, target foreign keys, feature upsert on its unique key
+            assert (await http.get("/api/assets/SOL/analysis")).json()["persistence"] == "ok"
+            scan = (await http.get("/api/signals")).json()
+            assert len(scan["signals"]) == 20 and not scan["errors"]
+            assert (await http.get("/api/market/regime")).status_code == 200
+            history = (await http.get("/api/signals/history", params={"symbol": "SOL"})).json()
+            assert history["persistence"] == "ok" and history["signals"][0]["symbol"] == "SOL"
     async with sessions() as s:
-        expected = 5 * settings.candle_fetch_limit  # 5 timeframes; the extra candles call must not duplicate
+        # 5m, 15m, 1H at the base limit; 4H and 1D at the long limit. The candles call must not duplicate.
+        expected = 3 * settings.candle_fetch_limit + 2 * settings.fetch_limit(Timeframe.D1)
         assert await s.scalar(select(func.count()).select_from(Candle).where(Candle.base_asset == "SOL")) == expected
         assert await s.scalar(select(func.count()).select_from(MarketSnapshot)) == 20
+        assert await s.scalar(select(func.count()).select_from(Signal)) == 20
+        assert await s.scalar(select(func.count()).select_from(TechnicalFeature).where(TechnicalFeature.symbol == "SOL")) == 3
+        assert await s.scalar(select(func.count()).select_from(MarketRegime)) == 1
+        planned = await s.scalar(select(func.count()).select_from(Signal).where(Signal.entry_low.is_not(None)))
+        assert await s.scalar(select(func.count()).select_from(SignalTarget)) == 4 * planned
     await engine.dispose()
 
 

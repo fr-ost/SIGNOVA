@@ -60,7 +60,7 @@ class Settings(BaseSettings):
 
     # --- application ---------------------------------------------------------
     app_name: str = "Crypto Market Analysis & Spot Signal Dashboard"
-    app_version: str = "0.1.1-phase1"
+    app_version: str = "0.2.0-phase2"
     environment: Literal["development", "test", "production"] = "development"
     log_level: str = "INFO"
     json_logs: bool = True
@@ -140,6 +140,8 @@ class Settings(BaseSettings):
     cross_source_max_deviation_pct: float = 1.5
     require_price_cross_validation: bool = True
     candle_fetch_limit: int = 500
+    # 4H and 1D need a long warm-up for EMA200 (Binance serves up to 1000 per request, Kraken 720).
+    candle_fetch_limit_long: int = 1000
     candle_min_history: int = 210
     candle_stale_tolerance_intervals: float = 1.0
     candle_stale_grace_seconds: float = 90.0
@@ -163,11 +165,41 @@ class Settings(BaseSettings):
         default_factory=lambda: [tf.value for tf in ALL_TIMEFRAMES]
     )
 
+    # --- Phase 2: analysis and signals -------------------------------------------------
+    analysis_cache_seconds: int = 30
+    signal_scan_cache_seconds: int = 120
+    signal_scan_concurrency: int = 4
+    regime_cache_seconds: int = 600
+    regime_min_breadth_sample: int = 8
+    signal_min_score_strong_buy: float = 80.0
+    signal_min_score_buy: float = 65.0
+    signal_min_score_watch: float = 50.0
+    signal_persist_enabled: bool = True
+    feature_persist_timeframes: CsvList = Field(default_factory=lambda: ["1h", "4h", "1d"])
+    regime_persist_min_interval_seconds: int = 3600
+
+    # --- Phase 2: risk engine (defaults match the risk_settings table) --------------------
+    risk_max_per_signal_pct: float = 1.0
+    risk_max_allocation_pct: float = 10.0
+    risk_fee_pct: float = 0.1
+    risk_slippage_pct: float = 0.05
+    risk_min_reward_risk: float = 1.5
+    risk_strong_min_reward_risk: float = 2.0
+    risk_min_room_r: float = 0.75
+    risk_strong_min_room_r: float = 1.0
+    risk_max_stop_pct: float = 15.0
+    risk_max_spread_bps: float = 30.0
+    risk_min_depth_usd: float = 25_000.0
+    risk_min_volume_24h_usd: float = 5_000_000.0
+    risk_max_extension_atr: float = 2.5
+    risk_max_change_24h_pct: float = 25.0
+
     @field_validator(
         "cors_origins",
         "binance_rest_base_urls",
         "binance_ws_base_urls",
         "integrity_required_timeframes",
+        "feature_persist_timeframes",
         mode="before",
     )
     @classmethod
@@ -187,10 +219,16 @@ class Settings(BaseSettings):
             return {k.strip().upper(): v.strip().upper() for k, v in pairs}
         return value
 
-    @field_validator("integrity_required_timeframes")
+    @field_validator("integrity_required_timeframes", "feature_persist_timeframes")
     @classmethod
     def _validate_timeframes(cls, value: list[str]) -> list[str]:
         return [Timeframe.parse(item).value for item in value]
+
+    def fetch_limit(self, timeframe: Timeframe) -> int:
+        """Candles fetched per request for a timeframe."""
+        if timeframe in (Timeframe.H4, Timeframe.D1):
+            return max(self.candle_fetch_limit, self.candle_fetch_limit_long)
+        return self.candle_fetch_limit
 
     @property
     def required_timeframes(self) -> tuple[Timeframe, ...]:
