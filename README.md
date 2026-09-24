@@ -15,7 +15,7 @@ Nothing in this project promises profitability or accuracy.
 | 2 | Historical data, indicators, structure, regime, quantitative signal and risk engine | **Done** |
 | 3 | On-demand controls, dashboard UI, charts, live updates | **Done** |
 | 4 | Portfolio, risk, allocation, DCA, P/L scenarios | **Done** |
-| 5 | News, sentiment, whale / on-chain | Partly: news headlines, keyword tone, CoinGecko trending |
+| 5 | News, sentiment, whale / on-chain | **Done** |
 | 6 | Alerts | Next |
 | 7 | OpenAI reasoning layer | Partly: AI chat assistant (read-only; cannot change signals) |
 | 8 | Signal tracking, backtesting, statistics | |
@@ -243,7 +243,7 @@ as a share of equity, and P/L after costs for "stop hit", "TP1 then stop at entr
 
 **AI assistant** (homepage, `POST /api/chat`): chat with an OpenAI model about the next trade.
 Each question carries the dashboard's own data as context: the latest scan and market regime,
-news headlines, your portfolio and risk settings and, if you pick a coin (or press "Ask AI about
+news headlines, market mood and on-chain data, your portfolio and risk settings and, if you pick a coin (or press "Ask AI about
 this coin"), its full analysis. The system prompt makes the engine authoritative: the assistant
 explains and discusses but cannot turn a NO TRADE or WATCH into a buy. Models:
 `OPENAI_ANALYSIS_MODEL` (default `gpt-5-mini`), falling back to `OPENAI_FALLBACK_MODEL`
@@ -256,6 +256,43 @@ and CoinGecko trending coins, with no keys needed. Headlines are de-duplicated, 
 coins they mention, given a keyword-based tone (labelled as such) and stored in the `news` table.
 A source that fails is listed, never guessed. News is context for you and the assistant; it is
 not an input to the signal engine.
+
+## Sentiment and on-chain (Phase 5)
+
+**Market mood** (`GET /api/sentiment`, cached 10 minutes): three transparent components, each
+scaled from -1 (fear) to +1 (greed) and combined with fixed weights:
+
+| Component | Source | Weight |
+|---|---|---|
+| Fear & Greed now vs 50, with 7-day and 30-day averages and the 7-day trend | alternative.me | 0.5 |
+| News tone of the last 48 hours (keyword method) | the news sources above | 0.3 |
+| Average perpetual funding vs the 0.01%/8h baseline | Binance futures `premiumIndex` (public) | 0.2 |
+
+The score maps to EXTREME FEAR, FEAR, NEUTRAL, GREED or EXTREME GREED. Stablecoin supply
+change (DefiLlama) is shown alongside as a liquidity indicator but not weighted.
+
+**Per coin**: headline tone, perpetual funding rate and labelled exchange flows. Notes are
+raised for crowded longs (funding >= 0.05% per 8h), crowded shorts (<= -0.03%), mostly
+negative headlines and large labelled exchange inflows. These notes join the signal's
+"Risks to keep in mind" as `sentiment: ...`. **Sentiment never changes a label or a score**;
+there is no measured evidence yet that it improves them (that is Phase 8's job).
+
+**On-chain** (`GET /api/onchain`, cached 10 minutes), all free and keyless:
+
+| Data | Source |
+|---|---|
+| BTC fees, mempool size, hashrate, next difficulty adjustment | mempool.space |
+| Large BTC transactions (>= `WHALE_MIN_BTC`, default 100 BTC) | blockchain.com unconfirmed transactions |
+| ETH gas, network utilisation, large ETH transfers (>= `WHALE_MIN_ETH`, default 1000 ETH) | Blockscout, whose public address names identify many exchange wallets |
+| USD stablecoin supply and its 1d / 7d / 30d change | DefiLlama |
+| Optional: labelled whale transfers on every major chain | Whale Alert (`WHALE_ALERT_API_KEY`) |
+
+A transfer is only called an exchange inflow or outflow when a source labels one side as an
+exchange; everything else is "unlabelled". Large transfers are stored in `whale_events`,
+sentiment readings in `sentiment`. Pressing Analyze now refreshes sentiment first (at most
+once a minute), so each scan carries current notes. Forced refreshes within
+`MIN_REFRESH_SECONDS` (60) of the last fetch are served from the cache to protect the free
+sources.
 
 ## Security
 
@@ -283,6 +320,8 @@ Without `ADMIN_TOKEN`, anyone who finds the URL can use those controls.
 | `GET /api/live` | Latest streamed prices (no provider calls) |
 | `GET/POST /api/watchlist`, `DELETE /api/watchlist/{symbol}` | Watchlist (changes need the token) |
 | `GET /api/news?refresh=true` | Headlines, tone, trending coins from free sources |
+| `GET /api/sentiment?refresh=true` | Phase 5: market mood, components, per-coin sentiment and notes |
+| `GET /api/onchain?refresh=true` | Phase 5: BTC/ETH network state, stablecoin supply, large transfers, exchange flows |
 | `POST /api/chat` | AI assistant (token) |
 | `GET /api/portfolio`, `PUT /cash`, `POST/DELETE /positions`, `PUT /risk`, `POST /plan` | Portfolio, risk settings, trade plan (token) |
 | `GET /api/assets/{symbol}/analysis` | Phase 2: indicators, structure, regimes, score factors, trade plan, risk checks, full pipeline |
@@ -351,6 +390,9 @@ Portfolio > Risk settings, which are stored in the database and take precedence.
 | `AUTO_ANALYZE_MINUTES` | 0 | scan schedule at startup (0 = manual only) |
 | `OPENAI_ANALYSIS_MODEL` / `OPENAI_FALLBACK_MODEL` | gpt-5-mini / gpt-4o-mini | chat models |
 | `NEWS_CACHE_SECONDS` / `NEWS_FEEDS` | 900 / four RSS feeds | news cadence and sources |
+| `SENTIMENT_CACHE_SECONDS` / `ONCHAIN_CACHE_SECONDS` | 600 / 600 | Phase 5 cadence |
+| `WHALE_MIN_BTC` / `WHALE_MIN_ETH` | 100 / 1000 | smallest transfer listed as a whale |
+| `WHALE_ALERT_API_KEY` / `WHALE_ALERT_MIN_USD` | unset / 1000000 | optional Whale Alert source |
 | `REGIME_CACHE_SECONDS` | 600 | market regime refresh |
 | `CANDLE_FETCH_LIMIT` / `CANDLE_FETCH_LIMIT_LONG` | 500 / 1000 | candles per request (5m-1H / 4H-1D) |
 | `SIGNAL_PERSIST_ENABLED` / `FEATURE_PERSIST_TIMEFRAMES` | true / 1h,4h,1d | history storage |
@@ -392,6 +434,9 @@ deterministic synthetic markets sampled into consistent 5m-1D candles (strong up
 parabolic move, failed integrity gate, wide spread, bear and neutral regimes, missing history,
 unsupported asset, STRONG BUY downgrades), trade-plan math net of costs, sizing, final validation,
 and the Phase 2 endpoints with persistence and de-duplication (SQLite and PostgreSQL).
+Phase 3-5: manual control, watchlist, news parsing, chat, portfolio, and the on-chain and
+sentiment parsers, scores, notes, endpoints, refresh guard and persistence, with every free
+source mocked. Sentiment notes are checked to leave labels and scores unchanged.
 Fake adapters and synthetic markets exist only in `backend/tests`; production code never
 generates data.
 
@@ -426,4 +471,5 @@ Dockerfile, railway.json, .env.example
 
 Phase 3/4 services: `control.py` (manual scans, schedule, live prices), `watchlist.py`,
 `news.py`, `chat.py` and `assistant.py` (OpenAI chat and its context), `portfolio.py`;
+Phase 5: `onchain.py` (network data, whales, stablecoins) and `sentiment.py` (market mood);
 routes in `api/controls.py`.

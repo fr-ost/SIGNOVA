@@ -60,7 +60,7 @@ class Settings(BaseSettings):
 
     # --- application ---------------------------------------------------------
     app_name: str = "Crypto Market Analysis & Spot Signal Dashboard"
-    app_version: str = "0.4.0-phase4"
+    app_version: str = "0.5.0-phase5"
     environment: Literal["development", "test", "production"] = "development"
     log_level: str = "INFO"
     json_logs: bool = True
@@ -194,6 +194,20 @@ class Settings(BaseSettings):
     chat_max_output_tokens: int = 1500
     chat_rate_limit_per_minute: int = 10
 
+    # --- Phase 5: sentiment and on-chain (free public sources) -------------------------
+    sentiment_cache_seconds: int = 600
+    onchain_cache_seconds: int = 600
+    min_refresh_seconds: int = 60  # a forced refresh never hits the sources more often
+    mempool_base_url: str = "https://mempool.space/api"
+    blockchain_info_url: str = "https://blockchain.info"
+    blockscout_eth_url: str = "https://eth.blockscout.com/api/v2"
+    defillama_stablecoins_url: str = "https://stablecoins.llama.fi"
+    binance_futures_url: str = "https://fapi.binance.com"
+    whale_min_btc: float = 100.0
+    whale_min_eth: float = 1000.0
+    whale_alert_api_key: SecretStr | None = None  # optional: labelled exchange flows, all chains
+    whale_alert_min_usd: int = 1_000_000
+
     # --- Phase 2: risk engine (defaults match the risk_settings table) --------------------
     risk_max_per_signal_pct: float = 1.0
     risk_max_allocation_pct: float = 10.0
@@ -270,6 +284,11 @@ class Settings(BaseSettings):
         return value or None
 
     @property
+    def whale_alert_key(self) -> str | None:
+        value = self.whale_alert_api_key.get_secret_value().strip() if self.whale_alert_api_key else ""
+        return value or None
+
+    @property
     def chat_models(self) -> list[str]:
         models = [self.openai_analysis_model or "gpt-5-mini", self.openai_fallback_model or "gpt-4o-mini"]
         return list(dict.fromkeys(m for m in models if m))
@@ -281,7 +300,7 @@ class Settings(BaseSettings):
     def secret_values(self) -> list[str]:
         """Secrets that must be redacted from logs."""
         values = []
-        for secret in (self.openai_api_key, self.cmc_api_key, self.admin_token):
+        for secret in (self.openai_api_key, self.cmc_api_key, self.admin_token, self.whale_alert_api_key):
             if secret is not None and secret.get_secret_value():
                 values.append(secret.get_secret_value())
         return values

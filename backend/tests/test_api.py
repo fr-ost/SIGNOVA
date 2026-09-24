@@ -49,6 +49,9 @@ async def _make_client(settings: Settings, engine, spot=None):
             reference_candle_adapter=FakeReferenceAdapter(),
         )
         c.engine = engine
+        # free public sources (news, on-chain, sentiment) never touch the real network in tests
+        offline = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(503)))
+        c.news._http = c.onchain._http = c.sentiment._http = offline
         return c
 
     app = create_app(settings, container_factory=factory)

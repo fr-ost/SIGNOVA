@@ -33,6 +33,7 @@ log = logging.getLogger(__name__)
 
 MAX_BYTES = 3_000_000
 MAX_ITEMS = 60
+MIN_REFRESH_SECONDS = 60
 COINGECKO_TRENDING = "https://api.coingecko.com/api/v3/search/trending"
 
 POSITIVE = {
@@ -228,6 +229,9 @@ class NewsService:
         return entry[0] if entry else None
 
     async def digest(self, *, force: bool = False) -> NewsDigest:
+        entry = self._cache.peek("news")
+        if force and entry is not None and entry[1] < MIN_REFRESH_SECONDS:
+            force = False  # protect the free sources from rapid refreshes
         return await self._cache.get_or_load("news", self._load, self._ttl, force=force)
 
     async def _get(self, url: str) -> httpx.Response:

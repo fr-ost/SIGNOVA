@@ -574,6 +574,7 @@ class AnalysisOut(_Model):
     regimes: list[TimeframeRegimeOut]
     market_regime: MarketRegimeOut
     persistence: str
+    sentiment: dict[str, Any] | None = Field(None, description="Phase 5 context: news tone, funding, exchange flows")
     disclaimer: str = DISCLAIMER
 
 

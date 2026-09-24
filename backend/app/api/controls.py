@@ -142,6 +142,21 @@ async def news(c: ContainerDep, refresh: bool = False) -> dict[str, Any]:
     return asdict(digest)
 
 
+# ----------------------------------------------------------------------------- sentiment, on-chain (Phase 5)
+
+
+@router.get("/api/sentiment", tags=["sentiment"])
+async def sentiment(c: ContainerDep, refresh: bool = False) -> dict[str, Any]:
+    """Market mood (Fear & Greed trend, funding, news tone) and per-coin sentiment (cached)."""
+    return (await c.sentiment.digest(force=refresh)).as_dict()
+
+
+@router.get("/api/onchain", tags=["sentiment"])
+async def onchain(c: ContainerDep, refresh: bool = False) -> dict[str, Any]:
+    """Bitcoin and Ethereum network state, stablecoin supply and large transfers (cached)."""
+    return (await c.onchain.digest(force=refresh)).as_dict()
+
+
 # ----------------------------------------------------------------------------- chat
 
 

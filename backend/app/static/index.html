@@ -237,6 +237,20 @@
         <div id="watch-items" class="chips"></div>
       </section>
 
+      <section class="card" aria-labelledby="mood-title">
+        <div class="card-head">
+          <h2 id="mood-title">Market mood &amp; on-chain</h2>
+          <button id="mood-refresh" type="button" class="ghost small">Refresh</button>
+        </div>
+        <div id="mood-summary"><p class="muted small">Loading sentiment…</p></div>
+        <div id="onchain-summary"></div>
+        <details id="whales-box" class="whales">
+          <summary class="small">Large transfers <span id="whale-count" class="muted"></span></summary>
+          <ul id="whale-list" class="news-list"></ul>
+        </details>
+        <div id="mood-meta" class="chips small muted"></div>
+      </section>
+
       <section class="card" aria-labelledby="news-title">
         <div class="card-head">
           <h2 id="news-title">Latest crypto news</h2>

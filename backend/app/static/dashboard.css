@@ -379,3 +379,13 @@ label.toggle { display: inline-flex; align-items: center; gap: 6px; cursor: poin
 .chart-legend i { display: inline-block; width: 14px; height: 2px; vertical-align: middle; margin-right: 5px; }
 .legend-ema20 { background: var(--accent); }
 .legend-ema50 { background: var(--series-2); }
+
+/* Phase 5: market mood, on-chain, whales */
+.mood-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 0 16px 8px; }
+.detail-grid.compact { grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px 16px; font-size: 13px; }
+#mood-summary > p, #onchain-summary > p { padding: 0 16px; margin: 0 0 10px; }
+.whales { padding: 0 16px 8px; }
+.whales summary { cursor: pointer; padding: 6px 0; }
+.whales .news-list { padding: 0; max-height: 360px; overflow-y: auto; }
+.whale-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; font-size: 13px; }
+.whale-row .badge { font-size: 12px; }

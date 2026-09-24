@@ -46,6 +46,8 @@ from app.services.assistant import chat_context, universe_names
 from app.services.chat import ChatService
 from app.services.control import AnalysisController
 from app.services.news import NewsService
+from app.services.onchain import OnChainService
+from app.services.sentiment import SentimentService
 from app.services.portfolio import PortfolioService
 from app.services.watchlist import WatchlistService
 from app.services.assets import AssetService
@@ -92,6 +94,8 @@ class Container:
     news: NewsService
     chat: ChatService
     portfolio: PortfolioService
+    onchain: OnChainService
+    sentiment: SentimentService
     stream: BinanceStreamManager | None = None
     live_prices: LivePriceBook = field(default_factory=LivePriceBook)
     cmc: CoinMarketCapClient | None = None
@@ -261,8 +265,23 @@ def build_container(
         session_factory=session_factory,
     )
     portfolio = PortfolioService(session_factory, router, universe, analysis, watchlist, live_prices=controller)
+
+    def listing_prices() -> dict[str, float]:
+        last = universe.last
+        return {a.symbol: a.listing.price_usd for a in last.assets} if last else {}
+
+    def sentiment_symbols() -> list[str]:
+        last = universe.last
+        return [a.symbol for a in last.assets if a.supported] if last else ["BTC", "ETH"]
+
+    onchain = OnChainService(settings, http, health, listing_prices, session_factory)
+    sentiment = SentimentService(settings, http, health, news, onchain, sentiment_symbols, session_factory)
+    analysis.sentiment_for = sentiment.for_asset
+    analysis.before_scan = lambda: sentiment.digest(force=True)
     chat = ChatService(
-        settings, http, lambda symbol: chat_context(analysis, controller, news, portfolio, watchlist, symbol)
+        settings,
+        http,
+        lambda symbol: chat_context(analysis, controller, news, portfolio, watchlist, symbol, sentiment, onchain),
     )
     return Container(
         settings=settings,
@@ -284,6 +303,8 @@ def build_container(
         news=news,
         chat=chat,
         portfolio=portfolio,
+        onchain=onchain,
+        sentiment=sentiment,
         stream=stream,
         live_prices=live_prices,
         cmc=cmc_client,

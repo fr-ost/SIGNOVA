@@ -715,6 +715,7 @@
     );
     parts.push(chartCard(a.symbol, a.plan));
     if (a.plan) parts.push(planCard(a.plan));
+    if (a.sentiment) parts.push(sentimentCard(a.sentiment));
     parts.push(
       card(
         "Why",
@@ -1022,6 +1023,7 @@
       lastScanAt = s.last_scan_at;
       refreshSignals();
       refreshPortfolio();
+      refreshMood();  // the scan refreshed sentiment; this reads the cache
     }
     scheduleControl(s.scan.running ? 2000 : 30000);
     if (s.live.running && !liveTimer) liveTimer = setInterval(refreshLive, 5000);
@@ -1143,6 +1145,143 @@
     } catch (err) {
       list.replaceChildren(h("li", { class: "muted small", text: `News unavailable: ${err.message}` }));
     }
+  }
+
+  // ---------------------------------------------------------------- Phase 5: market mood, on-chain, whales
+
+  const MOOD_TONE = { EXTREME_FEAR: "critical", FEAR: "serious", NEUTRAL: "neutral", GREED: "warning", EXTREME_GREED: "critical", UNKNOWN: "neutral" };
+  const COIN_MOOD_TONE = { POSITIVE: "good", NEGATIVE: "critical", MIXED: "warning", QUIET: "neutral" };
+  const FLOW_TONE = { exchange_inflow: "serious", exchange_outflow: "good", inter_exchange: "neutral", unknown: "neutral" };
+  const FLOW_LABEL = { exchange_inflow: "To exchange", exchange_outflow: "From exchange", inter_exchange: "Between exchanges", unknown: "Unlabelled" };
+  const fmtScore = (v) => (v == null ? DASH : (v > 0 ? "+" : v < 0 ? "−" : "") + Math.abs(v).toFixed(2));
+
+  function renderMood(s) {
+    const c = s.components || {};
+    const fg = c.fear_greed;
+    const funding = c.funding;
+    const news = c.news;
+    const stables = c.stablecoins;
+    $("mood-summary").replaceChildren(
+      h(
+        "div",
+        { class: "mood-head" },
+        toneBadge(MOOD_TONE[s.state] || "neutral", humanize(s.state)),
+        h("span", { class: "small", text: `score ${fmtScore(s.score)} (−1 fear … +1 greed)` }),
+        h("span", { class: "muted small", text: `trend ${humanize(s.trend).toLowerCase()}` }),
+      ),
+      h(
+        "dl",
+        { class: "detail-grid compact" },
+        kv("Fear & Greed", fg ? `${fg.value} ${fg.classification} · 7d avg ${fg.avg_7d} (${fg.change_7d > 0 ? "+" : ""}${fg.change_7d})` : DASH),
+        kv("Funding (avg)", funding ? `${funding.avg_pct_8h.toFixed(4)}% / 8h · ${funding.coins} coins` : DASH),
+        kv("Crowded longs", funding ? (funding.crowded_longs.length ? funding.crowded_longs.join(", ") : "none") : DASH),
+        kv("News tone 48h", news ? `${news.positive}+ / ${news.negative}− of ${news.headlines_48h}` : DASH),
+        kv("Stablecoins 7d", stables ? `${fmtPct(stables.change_7d_pct)} · ${fmtUsd(stables.total_usd)}` : DASH),
+      ),
+      h("p", { class: "muted small", text: "Context only: sentiment adds risk notes to signals, it never changes a label or score." }),
+    );
+    return s.errors || [];
+  }
+
+  function renderOnchain(o) {
+    const btc = o.btc || {};
+    const eth = o.eth || {};
+    const fees = btc.fees_sat_vb || {};
+    const gas = eth.gas_gwei || {};
+    const gwei = (v) => (v == null ? DASH : v.toFixed(v < 10 ? 2 : 0));
+    $("onchain-summary").replaceChildren(
+      h(
+        "dl",
+        { class: "detail-grid compact" },
+        kv("BTC fees", fees.halfHourFee == null ? DASH : `${fees.fastestFee} / ${fees.halfHourFee} / ${fees.hourFee} sat/vB`),
+        kv("BTC mempool", btc.mempool_tx_count == null ? DASH : `${fmtInt(btc.mempool_tx_count)} tx · ${btc.mempool_vsize_mb} MvB`),
+        kv("Hashrate", btc.hashrate_ehs == null ? DASH : `${fmtInt(btc.hashrate_ehs)} EH/s`),
+        kv("Next difficulty", btc.difficulty_change_pct == null ? DASH : `${fmtPct(btc.difficulty_change_pct)} in ${fmtInt(btc.blocks_to_retarget)} blocks`),
+        kv("ETH gas", gas.average == null ? DASH : `${gwei(gas.slow)} / ${gwei(gas.average)} / ${gwei(gas.fast)} gwei`),
+        kv("ETH usage", eth.network_utilization_pct == null ? DASH : `${eth.network_utilization_pct.toFixed(0)}% · ${fmtNum(eth.transactions_today)} tx today`),
+      ),
+    );
+    const flows = Object.entries(o.flows || {});
+    $("whale-count").textContent = `(${o.whales.length}${flows.length ? " · " + flows.map(([sym, f]) => `${sym} in ${fmtUsd(f.exchange_inflow)} / out ${fmtUsd(f.exchange_outflow)}`).join(" · ") : ""})`;
+    $("whale-list").replaceChildren(
+      ...(o.whales.length
+        ? o.whales.slice(0, 25).map((w) =>
+            h(
+              "li",
+              {},
+              h(
+                "div",
+                { class: "whale-row" },
+                h("strong", { text: `${fmtNum(w.amount)} ${w.symbol}` }),
+                h("span", { class: "muted", text: fmtUsd(w.amount_usd) }),
+                toneBadge(FLOW_TONE[w.classification] || "neutral", FLOW_LABEL[w.classification] || humanize(w.classification)),
+              ),
+              h(
+                "div",
+                { class: "news-sub" },
+                h("span", { text: `${w.from_label || "unknown"} → ${w.to_label || "unknown"}` }),
+                h("span", { text: fmtAgo(w.occurred_at) }),
+                w.url && /^https:\/\//.test(w.url) ? h("a", { href: w.url, target: "_blank", rel: "noopener noreferrer", text: w.source }) : h("span", { text: w.source }),
+              ),
+            ),
+          )
+        : [h("li", { class: "muted small", text: "No large transfers in the latest data." })]),
+    );
+    return o.errors || [];
+  }
+
+  let moodLoading = false;
+
+  async function refreshMood(force = false) {
+    if (moodLoading) return;
+    moodLoading = true;
+    const button = $("mood-refresh");
+    button.disabled = true;
+    const q = force ? "?refresh=true" : "";
+    // on-chain first: sentiment reuses its cached result instead of fetching twice
+    const onchain = await Promise.allSettled([getJSON(`/api/onchain${q}`, 60000)]);
+    const sentiment = await Promise.allSettled([getJSON(`/api/sentiment${q}`, 60000)]);
+    const errors = [];
+    let stamp = null;
+    if (sentiment[0].status === "fulfilled") {
+      errors.push(...renderMood(sentiment[0].value));
+      stamp = sentiment[0].value.computed_at;
+    } else {
+      $("mood-summary").replaceChildren(h("p", { class: "muted small", text: `Sentiment unavailable: ${sentiment[0].reason.message}` }));
+    }
+    let sources = [];
+    if (onchain[0].status === "fulfilled") {
+      errors.push(...renderOnchain(onchain[0].value));
+      sources = onchain[0].value.sources_ok;
+    } else {
+      $("onchain-summary").replaceChildren(h("p", { class: "muted small", text: `On-chain data unavailable: ${onchain[0].reason.message}` }));
+    }
+    const unique = [...new Set(errors)];
+    $("mood-meta").replaceChildren(
+      h("span", { text: `${stamp ? fmtTime(stamp) + " · " : ""}sources: alternative.me, Binance funding, news${sources.length ? ", " + sources.join(", ") : ""}` }),
+      ...(unique.length ? [h("span", { title: unique.join("\n"), text: `${unique.length} source(s) unavailable` })] : []),
+    );
+    button.disabled = false;
+    moodLoading = false;
+  }
+
+  function sentimentCard(s) {
+    const funding = s.funding_rate_pct;
+    return card(
+      "Sentiment & flows",
+      "context only, never changes the signal",
+      h(
+        "dl",
+        { class: "detail-grid" },
+        kv("News (48h)", s.headlines ? h("span", {}, toneBadge(COIN_MOOD_TONE[s.state] || "neutral", humanize(s.state)), ` ${s.positive}+ / ${s.negative}− of ${s.headlines}`) : "no recent headlines"),
+        kv("Funding rate", funding == null ? "no perpetual on Binance" : `${funding.toFixed(4)}% per 8h`),
+        kv("Exchange flows", s.exchange_inflow_usd == null && s.exchange_outflow_usd == null
+          ? "no labelled transfers"
+          : `in ${fmtUsd(s.exchange_inflow_usd)} · out ${fmtUsd(s.exchange_outflow_usd)}`),
+      ),
+      s.notes.length ? plainList(s.notes, "small") : null,
+      s.recent_titles.length ? h("div", { class: "card-foot small muted" }, s.recent_titles.map((t) => h("div", { text: t }))) : null,
+    );
   }
 
   // ---------------------------------------------------------------- chat
@@ -1474,6 +1613,9 @@
 
     $("news-refresh").addEventListener("click", () => refreshNews(true));
     refreshNews();
+
+    $("mood-refresh").addEventListener("click", () => refreshMood(true));
+    refreshMood();
 
     try {
       chatMessages = JSON.parse(sessionStorage.getItem("chat") || "[]");
