@@ -170,8 +170,12 @@ class ChatService:
             }
         raise ChatUnavailable("; ".join(errors) or "no chat model available", 502)
 
-    def _payload(self, model: str, messages: list[dict[str, str]], effort: str | None) -> dict[str, Any]:
+    def _payload(
+        self, model: str, messages: list[dict[str, str]], effort: str | None, json_mode: bool = False
+    ) -> dict[str, Any]:
         payload: dict[str, Any] = {"model": model, "messages": messages}
+        if json_mode:
+            payload["response_format"] = {"type": "json_object"}
         if self.is_reasoning(model):
             chosen = effort or self._s.chat_reasoning_effort
             if chosen == "minimal" and not model.lower().startswith("gpt-5"):
@@ -184,13 +188,13 @@ class ChatService:
         return payload
 
     async def _complete(
-        self, model: str, messages: list[dict[str, str]], effort: str | None = None
+        self, model: str, messages: list[dict[str, str]], effort: str | None = None, json_mode: bool = False
     ) -> tuple[str, dict[str, Any]]:
         assert self._s.openai_api_key is not None
         try:
             response = await self._http.post(
                 f"{self._s.openai_base_url.rstrip('/')}/chat/completions",
-                json=self._payload(model, messages, effort),
+                json=self._payload(model, messages, effort, json_mode),
                 headers={"Authorization": f"Bearer {self._s.openai_api_key.get_secret_value()}"},
                 timeout=httpx.Timeout(120.0, connect=10.0),
             )

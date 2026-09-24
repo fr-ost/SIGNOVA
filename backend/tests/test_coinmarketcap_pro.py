@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 import httpx
 import pytest
 
-from app.core.enums import CrossCheckStatus, DataState, ProviderStatus, Timeframe
+from app.core.enums import CrossCheckStatus, ProviderStatus, Timeframe
 from app.core.timeutil import floor_to_timeframe, utcnow
 from app.data.adapters.listings import (
     CoinMarketCapAdapter,

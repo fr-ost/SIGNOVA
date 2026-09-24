@@ -224,8 +224,11 @@ class OutcomeTracker:
             log.exception("track record query failed")
             return {**empty, "persistence": "failed"}
         by: dict[str, list[float]] = {}
+        by_ai: dict[str, list[float]] = {}
         for sig, out in closed:
             by.setdefault(sig.strategy, []).append(out.r_multiple or 0.0)
+            verdict = (sig.ai_output or {}).get("verdict") if isinstance(sig.ai_output, dict) else None
+            by_ai.setdefault(verdict or "not reviewed", []).append(out.r_multiple or 0.0)
         open_count: dict[str, int] = {}
         skipped: dict[str, int] = {}
         for strategy, status in pending:
@@ -254,8 +257,14 @@ class OutcomeTracker:
                 "symbol": sig.symbol, "strategy": sig.strategy, "label": STRATEGY_LABELS.get(sig.strategy, sig.strategy),
                 "signal": sig.signal, "created_at": sig.created_at, "entry": sig.entry_high, "stop": sig.stop_loss,
                 "outcome": out.outcome, "r_multiple": out.r_multiple, "return_pct": out.return_pct,
+                "ai_verdict": (sig.ai_output or {}).get("verdict") if isinstance(sig.ai_output, dict) else None,
                 "hit_targets": out.hit_targets, "hours": round((out.time_to_outcome_seconds or 0) / 3600, 1),
             }
             for sig, out in closed[:25]
         ]
-        return {"days": days, "strategies": strategies, "recent": recent, "persistence": "ok"}
+        ai_rows = [
+            {"verdict": verdict, "closed": len(rs), "win_rate": 100.0 * sum(1 for r in rs if r > 0) / len(rs),
+             "avg_r": statistics.fmean(rs), "total_r": math.fsum(rs)}
+            for verdict, rs in sorted(by_ai.items()) if rs
+        ]
+        return {"days": days, "strategies": strategies, "recent": recent, "by_ai": ai_rows, "persistence": "ok"}

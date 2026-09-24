@@ -62,7 +62,7 @@ class Settings(BaseSettings):
 
     # --- application ---------------------------------------------------------
     app_name: str = "Crypto Market Analysis & Spot Signal Dashboard"
-    app_version: str = "0.6.0-phase6"
+    app_version: str = "0.9.0-phase9"
     environment: Literal["development", "test", "production"] = "development"
     log_level: str = "INFO"
     json_logs: bool = True

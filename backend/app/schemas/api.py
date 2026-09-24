@@ -577,6 +577,7 @@ class AnalysisOut(_Model):
     market_regime: MarketRegimeOut
     persistence: str
     sentiment: dict[str, Any] | None = Field(None, description="Phase 5 context: news tone, funding, exchange flows")
+    ai_review: dict[str, Any] | None = Field(None, description="Phase 7: the AI reviewer's verdict, if requested")
     disclaimer: str = DISCLAIMER
 
 
@@ -601,6 +602,7 @@ class SignalSummaryOut(_Model):
     summary: str
     reasons: list[str]
     watchlist: bool = False
+    ai_review: dict[str, Any] | None = None  # Phase 7: the AI reviewer's verdict, if one was requested
 
 
 class SignalScanOut(_Model):

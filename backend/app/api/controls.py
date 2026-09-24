@@ -48,10 +48,31 @@ def full_status(c: Container) -> dict[str, Any]:
     return {
         **c.controller.status(),
         "scalp": c.scalp.status(),
+        "lab": c.lab.status(),
         "auth_required": c.settings.admin_token_value is not None,
         "chat_available": c.chat.configured,
         "watchlist": c.watchlist.symbols(),
+        "emergency_stop": c.kill.status(),
     }
+
+
+class KillIn(BaseModel):
+    reason: str | None = Field(default=None, max_length=200)
+
+
+@router.post("/api/control/kill", tags=["control"])
+async def emergency_stop(c: ContainerDep, _: Admin, body: KillIn | None = None) -> dict[str, Any]:
+    """Emergency stop: halt scans, schedule, lab and live prices, and refuse every provider, news
+    and AI call until Resume. Survives restarts."""
+    await c.emergency_stop(body.reason if body else None)
+    return full_status(c)
+
+
+@router.post("/api/control/resume", tags=["control"])
+async def emergency_resume(c: ContainerDep, _: Admin) -> dict[str, Any]:
+    """Release the emergency stop. Nothing restarts on its own: press Analyze now when ready."""
+    await c.resume()
+    return full_status(c)
 
 
 @router.get("/api/control/status", tags=["control"])
@@ -143,6 +164,8 @@ HorizonQuery = Annotated[str, Query(pattern=r"^(15m|1h|4h)$")]
 @router.post("/api/scalp/scan", tags=["scalp"])
 async def scalp_scan(c: ContainerDep, _: Admin, horizon: HorizonQuery = "1h") -> dict[str, Any]:
     """Find scalp setups on the selected coins now (in the background), with a backtest per coin."""
+    if c.kill.active:
+        raise HTTPException(status_code=503, detail="emergency stop is engaged")
     started = c.scalp.start_scan(horizon)
     return {"started": started, "status": c.scalp.status()}
 
@@ -160,6 +183,130 @@ async def scalp_symbol(symbol: SymbolPath, c: ContainerDep, _: Admin, horizon: H
         return await c.scalp.analyze(symbol, horizon)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from None
+
+
+# ----------------------------------------------------------------------------- strategy lab, statistical filter
+
+
+class VariantIn(BaseModel):
+    filter: str = Field(max_length=16)
+    exit: str = Field(max_length=16)
+
+
+class ToggleIn(BaseModel):
+    enabled: bool
+
+
+def _lab_view(c: Container, horizon: str) -> dict[str, Any]:
+    from app.analysis import lab as lab_rules
+
+    return {
+        "horizon": horizon,
+        "status": c.lab.status()[horizon],
+        "result": c.lab.results.get(horizon),
+        "applied": c.scalp.variant_info.get(horizon, {"filter": "base", "exit": "x1", "label": "published rules",
+                                                      "source": "default"}),
+        "model": c.scalp.models[horizon].as_dict() if horizon in c.scalp.models else None,
+        "ml_enabled": c.scalp.ml_enabled.get(horizon, True),
+        "filters": [{"key": v.key, "label": v.label} for v in lab_rules.FILTERS],
+        "exits": [{"key": v.key, "label": v.label} for v in lab_rules.EXITS],
+    }
+
+
+@router.get("/api/lab", tags=["lab"])
+async def lab_view(c: ContainerDep, horizon: HorizonQuery = "1h") -> dict[str, Any]:
+    """Strategy lab: the latest walk-forward result, the variant in use and the statistical model."""
+    return _lab_view(c, horizon)
+
+
+@router.post("/api/lab/run", tags=["lab"])
+async def lab_run(c: ContainerDep, _: Admin, horizon: HorizonQuery = "1h") -> dict[str, Any]:
+    """Test the rule variants on the selected coins' history (older 70% chooses, newer 30% checks)
+    and train the statistical filter. Runs in the background."""
+    if c.kill.active:
+        raise HTTPException(status_code=503, detail="emergency stop is engaged")
+    return {"started": c.lab.start(horizon), **_lab_view(c, horizon)}
+
+
+@router.post("/api/lab/apply", tags=["lab"])
+async def lab_apply(body: VariantIn, c: ContainerDep, _: Admin, horizon: HorizonQuery = "1h") -> dict[str, Any]:
+    """Use a variant by hand (even one the lab did not confirm: your decision)."""
+    try:
+        await c.scalp.apply_variant(horizon, body.filter, body.exit, source="manual")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    return _lab_view(c, horizon)
+
+
+@router.post("/api/lab/reset", tags=["lab"])
+async def lab_reset(c: ContainerDep, _: Admin, horizon: HorizonQuery = "1h") -> dict[str, Any]:
+    """Back to the published rules."""
+    await c.scalp.reset_variant(horizon)
+    return _lab_view(c, horizon)
+
+
+@router.get("/api/ml", tags=["lab"])
+async def ml_view(c: ContainerDep, horizon: HorizonQuery = "1h") -> dict[str, Any]:
+    model = c.scalp.models.get(horizon)
+    return {"horizon": horizon, "enabled": c.scalp.ml_enabled.get(horizon, True),
+            "model": model.as_dict() if model else None}
+
+
+@router.put("/api/ml", tags=["lab"])
+async def ml_toggle(body: ToggleIn, c: ContainerDep, _: Admin, horizon: HorizonQuery = "1h") -> dict[str, Any]:
+    """Switch the statistical filter on or off for a horizon (it only ever acts when validated)."""
+    await c.scalp.set_ml_enabled(horizon, body.enabled)
+    return await ml_view(c, horizon)
+
+
+# ----------------------------------------------------------------------------- AI review (phase 7)
+
+
+class ReviewIn(BaseModel):
+    kind: str = Field(pattern=r"^(swing|scalp)$")
+    symbol: str = Field(min_length=1, max_length=15, pattern=r"^[A-Za-z0-9]+$")
+    horizon: str | None = Field(default=None, pattern=r"^(15m|1h|4h)$")
+    model: str | None = Field(default=None, max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
+
+
+class ReviewSettingsIn(BaseModel):
+    mode: str | None = Field(default=None, pattern=r"^(advisory|filter)$")
+    auto: bool | None = None
+    auto_max: int | None = Field(default=None, ge=1, le=10)
+
+
+@router.post("/api/ai/review", tags=["ai"])
+async def ai_review(body: ReviewIn, c: ContainerDep, _: Admin) -> dict[str, Any]:
+    """A second opinion from the OpenAI model on one signal: agree, caution or reject (it can only lower)."""
+    symbol = body.symbol.upper()
+    if body.kind == "scalp":
+        horizon = body.horizon or "1h"
+        result = c.scalp.results.get(horizon)
+        signal = next((s for s in (result or {}).get("signals", []) if s["symbol"] == symbol), None)
+        if signal is None:
+            raise HTTPException(status_code=404, detail=f"no {horizon} scalp result for {symbol}: run Find scalps first")
+    else:
+        horizon = ""
+        cached = c.analysis.cached(symbol) or await c.analysis.analyze(symbol)
+        signal = cached.model_dump(mode="json")
+    try:
+        return await c.ai_review.review(body.kind, symbol, signal, horizon=horizon, model=body.model)
+    except ChatUnavailable as exc:
+        raise HTTPException(status_code=exc.status_code if exc.status_code != 204 else 502, detail=exc.message) from None
+
+
+@router.get("/api/ai/settings", tags=["ai"])
+async def ai_settings(c: ContainerDep) -> dict[str, Any]:
+    return c.ai_review.settings()
+
+
+@router.put("/api/ai/settings", tags=["ai"])
+async def ai_settings_update(body: ReviewSettingsIn, c: ContainerDep, _: Admin) -> dict[str, Any]:
+    """advisory: verdicts are shown only; filter: a reject caps a buy at WATCH. auto: review new buys after scans."""
+    try:
+        return await c.ai_review.update(mode=body.mode, auto=body.auto, auto_max=body.auto_max)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
 
 
 @router.get("/api/performance", tags=["signals"])
@@ -194,6 +341,8 @@ async def add_watch(body: WatchIn, c: ContainerDep, _: Admin) -> dict[str, Any]:
 @router.delete("/api/watchlist/{symbol}", tags=["watchlist"])
 async def remove_watch(symbol: SymbolPath, c: ContainerDep, _: Admin) -> dict[str, Any]:
     removed = await c.watchlist.remove(symbol)
+    if removed:
+        await c.selection.discard(symbol)
     return {"removed": removed, "items": [{"symbol": s, "note": n} for s, n in c.watchlist.items()]}
 
 

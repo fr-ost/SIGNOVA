@@ -222,6 +222,10 @@ def summary_out(a: AnalysisOut) -> SignalSummaryOut:
     )
 
 
+class ScanStopped(Exception):
+    """A scan ended early because Stop (or the emergency stop) was pressed."""
+
+
 def _failed_summary(asset: UniverseAsset, error: str) -> SignalSummaryOut:
     return SignalSummaryOut(
         symbol=asset.symbol,
@@ -346,8 +350,13 @@ class AnalysisService:
         force: bool = True,
         on_start: Callable[[int], None] | None = None,
         on_progress: Callable[[str], None] | None = None,
+        should_stop: Callable[[], bool] | None = None,
     ) -> SignalScanOut:
-        """Analyse the whole universe now. Runs only when called (Analyze now / auto schedule)."""
+        """Analyse the whole universe now. Runs only when called (Analyze now / auto schedule).
+
+        `should_stop` is checked before each coin: a stop lets the coins in progress finish
+        (no half-written database rows) and starts no new ones, then raises ScanStopped."""
+        stopping = should_stop or (lambda: False)
         if self.before_scan is not None:
             try:
                 await asyncio.wait_for(self.before_scan(), timeout=60)
@@ -364,6 +373,8 @@ class AnalysisService:
 
         async def one(asset: UniverseAsset) -> tuple[SignalSummaryOut, str | None]:
             async with semaphore:
+                if stopping():
+                    return _failed_summary(asset, "scan stopped"), None
                 try:
                     row = summary_out(await self.analyze(asset.symbol, force=force)), None
                 except asyncio.CancelledError:
@@ -378,6 +389,8 @@ class AnalysisService:
                 return row
 
         outcomes = await asyncio.gather(*(one(a) for a in chosen))
+        if stopping():
+            raise ScanStopped()
         rows = sorted(
             (row for row, _ in outcomes), key=lambda r: (-r.signal.rank, -r.score, r.universe_rank)
         )

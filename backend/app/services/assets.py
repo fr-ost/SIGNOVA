@@ -384,13 +384,6 @@ class AssetService:
             pct_change_7d=asset.listing.pct_change_7d,
             last_updated=asset.listing.last_updated,
         )
-
-        ticker: Ticker | None = None
-        ticker_market: MarketRef | None = None
-        book_summary: OrderBookSummary | None = None
-        reports: dict[Timeframe, CandleValidationReport] = {}
-        closed_by_tf: dict[Timeframe, list[Candle]] = {}
-        market_by_tf: dict[Timeframe, MarketRef] = {}
         tf_outputs: list[TimeframeValidationOut] = []
         candle_checks: dict[Timeframe, CandleCrossCheck] = {}
 
@@ -404,6 +397,31 @@ class AssetService:
         elif reference_tfs:
             reference_tasks = {tf: asyncio.create_task(self._reference_candles(asset, tf)) for tf in reference_tfs}
 
+        try:
+            return await self._collect_rest(
+                asset, timeframes, errors, listing_out, reference_tasks, candle_checks, tf_outputs
+            )
+        except BaseException:
+            for task in reference_tasks.values():  # never leave provider calls running behind an error or a stop
+                task.cancel()
+            raise
+
+    async def _collect_rest(
+        self,
+        asset: UniverseAsset,
+        timeframes: list[Timeframe],
+        errors: list[str],
+        listing_out: ListingInfoOut,
+        reference_tasks: dict[Timeframe, asyncio.Task[list[Candle]]],
+        candle_checks: dict[Timeframe, CandleCrossCheck],
+        tf_outputs: list[TimeframeValidationOut],
+    ) -> AssetCollection:
+        ticker: Ticker | None = None
+        ticker_market: MarketRef | None = None
+        book_summary: OrderBookSummary | None = None
+        reports: dict[Timeframe, CandleValidationReport] = {}
+        closed_by_tf: dict[Timeframe, list[Candle]] = {}
+        market_by_tf: dict[Timeframe, MarketRef] = {}
         if asset.supported:
             candle_results, ticker_result, book_result = await asyncio.gather(
                 asyncio.gather(

@@ -24,6 +24,7 @@
     <symbol id="i-target" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.2"/></symbol>
     <symbol id="i-zap" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m12.5 6-4 7h4l-1 5 4-7h-4z"/></symbol>
     <symbol id="i-trophy" viewBox="0 0 24 24"><path d="M8 4h8v5a4 4 0 0 1-8 0z"/><path d="M8 6H5a3 3 0 0 0 3 4M16 6h3a3 3 0 0 1-3 4M12 13v4M8 20h8M9 20l1-3h4l1 3"/></symbol>
+    <symbol id="i-flask" viewBox="0 0 24 24"><path d="M9 3h6M10 3v6l-5.5 9.5A2 2 0 0 0 6.2 21h11.6a2 2 0 0 0 1.7-2.5L14 9V3"/><path d="M7.5 15h9"/></symbol>
     <symbol id="i-logo" viewBox="0 0 24 24"><path d="M3 17 9 11l4 4 8-8"/><path d="M15 7h6v6"/></symbol>
   </svg>
   <header class="topbar">
@@ -41,8 +42,14 @@
       </label>
       <button id="refresh" type="button">Refresh data</button>
       <button id="theme" type="button" aria-label="Switch color theme">Theme</button>
+      <button id="kill" type="button" class="kill" title="Halt all analysis, live prices, news and AI calls">Emergency stop</button>
     </div>
   </header>
+  <div id="kill-banner" class="kill-banner" role="alert" hidden>
+    <strong>Emergency stop engaged</strong>
+    <span id="kill-text">All analysis, live prices, news and AI calls are halted. Stored results stay readable.</span>
+    <button id="resume" type="button">Resume</button>
+  </div>
 
   <main>
     <p class="notice">
@@ -190,6 +197,28 @@
       <div id="record-body"><p class="muted small pad">Loading…</p></div>
     </section>
 
+    <section class="card" data-feature="lab" aria-labelledby="lab-title">
+      <div class="card-head">
+        <h2 id="lab-title"><svg class="feat-icon" aria-hidden="true"><use href="#i-flask"/></svg>Strategy lab</h2>
+        <span id="lab-meta" class="muted small"></span>
+      </div>
+      <p class="muted small pad">Trains the scalp rules on real history: 36 variants (6 entry filters x 6 exit styles) are
+        backtested on the selected coins. The older 70% of the history chooses the variant; the newer 30%, never used for
+        choosing, checks it. A variant is applied only if it also made money on the newer data. The statistical filter is
+        trained the same way and acts only if it validates.</p>
+      <div class="control-row pad-row">
+        <div class="segmented" id="lab-horizons" role="radiogroup" aria-label="Lab horizon">
+          <button type="button" role="radio" data-lab-horizon="15m" aria-checked="false">15 min</button>
+          <button type="button" role="radio" data-lab-horizon="1h" aria-checked="true">1 hour</button>
+          <button type="button" role="radio" data-lab-horizon="4h" aria-checked="false">4 hours</button>
+        </div>
+        <button id="lab-run" type="button" class="primary">Run the lab</button>
+        <span id="lab-status" class="muted small" aria-live="polite"></span>
+      </div>
+      <div class="progress inset" aria-hidden="true"><span id="lab-progress"></span></div>
+      <div id="lab-body"><p class="muted small pad">Loading…</p></div>
+    </section>
+
     <section class="card" data-feature="portfolio" aria-labelledby="portfolio-title">
       <div class="card-head">
         <h2 id="portfolio-title"><svg class="feat-icon" aria-hidden="true"><use href="#i-wallet"/></svg>Portfolio</h2>
@@ -308,6 +337,15 @@
           <p class="muted small chat-hint">Ask about the latest scan, a coin's setup, news or your portfolio. The assistant
             sees the dashboard's data; its answers never change a signal.</p>
         </div>
+        <div class="ai-review-settings pad small">
+          <label class="toggle">Signal review
+            <select id="ai-mode" aria-label="AI signal review mode">
+              <option value="advisory">advisory (shows its verdict)</option>
+              <option value="filter">filter (a reject caps a buy at WATCH)</option>
+            </select>
+          </label>
+          <label class="toggle"><input id="ai-auto" type="checkbox"> Auto-review new buys (up to 3 per scan)</label>
+        </div>
         <form id="chat-form" class="chat-form">
           <div class="chat-options">
             <select id="chat-symbol" aria-label="Coin to focus on"><option value="">All coins</option></select>
@@ -334,7 +372,7 @@
           <input id="watch-symbol" placeholder="Symbol, e.g. PEPE" maxlength="15" required autocomplete="off">
           <button type="submit">Add</button>
         </form>
-        <div id="watch-items" class="chips"></div>
+        <ul id="watch-items" class="watch-list"></ul>
       </section>
 
       <section class="card" data-feature="mood" aria-labelledby="mood-title">
