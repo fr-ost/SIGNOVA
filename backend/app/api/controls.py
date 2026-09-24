@@ -11,7 +11,7 @@ import hmac
 from dataclasses import asdict
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Request
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 from pydantic import BaseModel, Field
 
 from app.api.deps import get_container
@@ -20,6 +20,7 @@ from app.schemas.api import SignalScanOut
 from app.services.chat import ChatUnavailable
 from app.services.container import Container
 from app.services.portfolio import PortfolioError
+from app.services.selection import SelectionError
 from app.services.watchlist import WatchlistError
 
 router = APIRouter()
@@ -42,21 +43,27 @@ Admin = Annotated[None, Depends(require_admin)]
 # ----------------------------------------------------------------------------- analysis control
 
 
-@router.get("/api/control/status", tags=["control"])
-async def control_status(c: ContainerDep) -> dict[str, Any]:
+def full_status(c: Container) -> dict[str, Any]:
+    """The same status shape for every control endpoint, so the dashboard never loses fields."""
     return {
         **c.controller.status(),
+        "scalp": c.scalp.status(),
         "auth_required": c.settings.admin_token_value is not None,
         "chat_available": c.chat.configured,
         "watchlist": c.watchlist.symbols(),
     }
 
 
+@router.get("/api/control/status", tags=["control"])
+async def control_status(c: ContainerDep) -> dict[str, Any]:
+    return full_status(c)
+
+
 @router.post("/api/control/analyze", tags=["control"])
 async def analyze_now(c: ContainerDep, _: Admin) -> dict[str, Any]:
     """Scan the Top 20 plus the watchlist once, in the background."""
     started = c.controller.start_scan("manual")
-    return {"started": started, **c.controller.status()}
+    return {"started": started, **full_status(c)}
 
 
 class AutoIn(BaseModel):
@@ -66,14 +73,38 @@ class AutoIn(BaseModel):
 @router.post("/api/control/auto", tags=["control"])
 async def set_auto(body: AutoIn, c: ContainerDep, _: Admin) -> dict[str, Any]:
     c.controller.set_auto(body.minutes)
-    return c.controller.status()
+    return full_status(c)
 
 
 @router.post("/api/control/stop", tags=["control"])
 async def stop_all(c: ContainerDep, _: Admin) -> dict[str, Any]:
-    """Stop the running scan, the auto schedule and live monitoring."""
+    """Stop the running scans (swing and scalp), the auto schedule and live monitoring."""
+    await c.scalp.stop()
     await c.controller.stop()
-    return c.controller.status()
+    return full_status(c)
+
+
+class SelectionIn(BaseModel):
+    mode: str = Field(pattern=r"^(all|selected)$")
+    symbols: list[str] = Field(default_factory=list, max_length=60)
+
+
+@router.get("/api/control/selection", tags=["control"])
+async def get_selection(c: ContainerDep) -> dict[str, Any]:
+    """Which coins Analyze now scans: every coin, or the user's selection."""
+    last = c.universe.last
+    universe = [{"symbol": a.symbol, "name": a.name, "rank": a.universe_rank, "watchlist": a.watchlist,
+                 "supported": a.supported, "selected": c.selection.includes(a.symbol)} for a in last.assets] if last else []
+    return {**c.selection.status(), "universe": universe}
+
+
+@router.put("/api/control/selection", tags=["control"])
+async def set_selection(body: SelectionIn, c: ContainerDep, _: Admin) -> dict[str, Any]:
+    try:
+        await c.selection.set(body.mode, body.symbols)
+    except (SelectionError, WatchlistError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    return await get_selection(c)
 
 
 @router.post("/api/control/live/start", tags=["control"])
@@ -82,13 +113,13 @@ async def live_start(c: ContainerDep, _: Admin) -> dict[str, Any]:
         symbols = await c.controller.start_live()
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from None
-    return {"symbols": symbols, **c.controller.status()}
+    return {"symbols": symbols, **full_status(c)}
 
 
 @router.post("/api/control/live/stop", tags=["control"])
 async def live_stop(c: ContainerDep, _: Admin) -> dict[str, Any]:
     await c.controller.stop_live()
-    return c.controller.status()
+    return full_status(c)
 
 
 @router.get("/api/live", tags=["control"])
@@ -102,6 +133,39 @@ async def live_prices(c: ContainerDep) -> dict[str, Any]:
 async def latest_signals(c: ContainerDep) -> SignalScanOut | None:
     """The latest completed scan (null until "Analyze now" has run). Never starts a scan."""
     return c.controller.last_scan
+
+
+# ----------------------------------------------------------------------------- scalp signals, track record
+
+HorizonQuery = Annotated[str, Query(pattern=r"^(15m|1h|4h)$")]
+
+
+@router.post("/api/scalp/scan", tags=["scalp"])
+async def scalp_scan(c: ContainerDep, _: Admin, horizon: HorizonQuery = "1h") -> dict[str, Any]:
+    """Find scalp setups on the selected coins now (in the background), with a backtest per coin."""
+    started = c.scalp.start_scan(horizon)
+    return {"started": started, "status": c.scalp.status()}
+
+
+@router.get("/api/scalp", tags=["scalp"])
+async def scalp_results(c: ContainerDep, horizon: HorizonQuery = "1h") -> dict[str, Any]:
+    """The latest scalp scan for a horizon (null until one ran) and the scan status."""
+    return {"status": c.scalp.status(), "result": c.scalp.results.get(horizon)}
+
+
+@router.get("/api/scalp/{symbol}", tags=["scalp"])
+async def scalp_symbol(symbol: SymbolPath, c: ContainerDep, _: Admin, horizon: HorizonQuery = "1h") -> dict[str, Any]:
+    """Scalp analysis of one coin now, with its backtest."""
+    try:
+        return await c.scalp.analyze(symbol, horizon)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from None
+
+
+@router.get("/api/performance", tags=["signals"])
+async def performance(c: ContainerDep, days: Annotated[int, Query(ge=1, le=365)] = 90) -> dict[str, Any]:
+    """Track record: what happened after each buy signal (swing and scalp), per strategy."""
+    return await c.tracker.performance(days)
 
 
 # ----------------------------------------------------------------------------- watchlist
@@ -123,6 +187,7 @@ async def add_watch(body: WatchIn, c: ContainerDep, _: Admin) -> dict[str, Any]:
         symbol = await c.watchlist.add(body.symbol, body.note)
     except WatchlistError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from None
+    await c.selection.include(symbol)
     return {"added": symbol, "items": [{"symbol": s, "note": n} for s, n in c.watchlist.items()]}
 
 
@@ -142,6 +207,36 @@ async def news(c: ContainerDep, refresh: bool = False) -> dict[str, Any]:
     return asdict(digest)
 
 
+# ----------------------------------------------------------------------------- sentiment, on-chain (Phase 5)
+
+
+@router.get("/api/sentiment", tags=["sentiment"])
+async def sentiment(c: ContainerDep, refresh: bool = False) -> dict[str, Any]:
+    """Market mood (Fear & Greed trend, funding, news tone) and per-coin sentiment (cached)."""
+    return (await c.sentiment.digest(force=refresh)).as_dict()
+
+
+@router.get("/api/onchain", tags=["sentiment"])
+async def onchain(c: ContainerDep, refresh: bool = False) -> dict[str, Any]:
+    """Bitcoin and Ethereum network state, stablecoin supply and large transfers (cached)."""
+    return (await c.onchain.digest(force=refresh)).as_dict()
+
+
+# ----------------------------------------------------------------------------- token unlocks, airdrops
+
+
+@router.get("/api/events/unlocks", tags=["events"])
+async def token_unlocks(c: ContainerDep, refresh: bool = False) -> dict[str, Any]:
+    """Upcoming token unlocks for the analysed coins (Mobula; needs MOBULA_API_KEY)."""
+    return (await c.events.unlocks(force=refresh)).as_dict()
+
+
+@router.get("/api/events/airdrops", tags=["events"])
+async def airdrops(c: ContainerDep, refresh: bool = False) -> dict[str, Any]:
+    """Active, claimable and upcoming airdrops (AlphaDrops; needs ALPHADROPS_API_KEY)."""
+    return (await c.events.airdrops(force=refresh)).as_dict()
+
+
 # ----------------------------------------------------------------------------- chat
 
 
@@ -153,14 +248,26 @@ class ChatMessage(BaseModel):
 class ChatIn(BaseModel):
     messages: list[ChatMessage] = Field(min_length=1, max_length=40)
     symbol: str | None = Field(default=None, max_length=15, pattern=r"^[A-Za-z0-9]+$")
+    model: str | None = Field(default=None, max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
+    reasoning_effort: str | None = Field(default=None, pattern=r"^(minimal|low|medium|high)$")
+
+
+@router.get("/api/chat/models", tags=["chat"])
+async def chat_models(c: ContainerDep, _: Admin) -> dict[str, Any]:
+    """Model choices for the assistant, marked with what the server's OpenAI key can use."""
+    return await c.chat.available_models()
 
 
 @router.post("/api/chat", tags=["chat"])
 async def chat(body: ChatIn, c: ContainerDep, _: Admin) -> dict[str, Any]:
     try:
-        return await c.chat.reply([m.model_dump() for m in body.messages], body.symbol.upper() if body.symbol else None)
+        return await c.chat.reply(
+            [m.model_dump() for m in body.messages], body.symbol.upper() if body.symbol else None,
+            model=body.model, reasoning_effort=body.reasoning_effort,
+        )
     except ChatUnavailable as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.message) from None
+        status = 502 if exc.status_code == 204 else exc.status_code
+        raise HTTPException(status_code=status, detail=exc.message) from None
 
 
 # ----------------------------------------------------------------------------- portfolio

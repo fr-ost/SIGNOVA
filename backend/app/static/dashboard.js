@@ -169,6 +169,16 @@
     }
   }
 
+  function pref(key, value) {
+    try {
+      if (value === undefined) return localStorage.getItem(key);
+      localStorage.setItem(key, value);
+    } catch {
+      /* storage unavailable: preference lasts for this page view */
+    }
+    return value ?? null;
+  }
+
   function askToken() {
     const value = window.prompt("This action needs the admin token (ADMIN_TOKEN on the server):", "");
     if (value == null) return false;
@@ -299,7 +309,8 @@
     const open = () => openDetail(row.symbol);
     return h(
       "tr",
-      { class: `clickable${row.supported ? "" : " unsupported"}`, onclick: open },
+      { class: `clickable${row.supported ? "" : " unsupported"}${selectionState && !isSelected(row.symbol) ? " deselected" : ""}`,
+        onclick: open, title: selectionState && !isSelected(row.symbol) ? "Not in your analysis selection" : null },
       h("td", { class: "num muted hide-sm", text: row.universe_rank }),
       h(
         "td",
@@ -374,6 +385,7 @@
     } else {
       excluded.hidden = true;
     }
+    loadSelection(); // the universe may have changed (no provider calls)
   }
 
   // ---------------------------------------------------------------- provider health
@@ -715,6 +727,7 @@
     );
     parts.push(chartCard(a.symbol, a.plan));
     if (a.plan) parts.push(planCard(a.plan));
+    if (a.sentiment) parts.push(sentimentCard(a.sentiment));
     parts.push(
       card(
         "Why",
@@ -1022,8 +1035,13 @@
       lastScanAt = s.last_scan_at;
       refreshSignals();
       refreshPortfolio();
+      refreshRecord();
+      if (moodLoaded) refreshMood();  // the scan refreshed sentiment; this reads the cache
+      if (unlocksLoaded) refreshEvents(false, true);
     }
-    scheduleControl(s.scan.running ? 2000 : 30000);
+    if (s.scalp) renderScalpStatus(s.scalp);
+    const scalpRunning = s.scalp && Object.values(s.scalp).some((x) => x.running);
+    scheduleControl(s.scan.running || scalpRunning ? 2000 : 30000);
     if (s.live.running && !liveTimer) liveTimer = setInterval(refreshLive, 5000);
     if (!s.live.running && liveTimer) {
       clearInterval(liveTimer);
@@ -1106,6 +1124,10 @@
 
   async function refreshNews(force = false) {
     const list = $("news-list");
+    const button = $("news-refresh");
+    button.disabled = true;
+    button.classList.add("busy");
+    if (!list.querySelector("a")) list.replaceChildren(...skeletonItems(4));
     try {
       const d = await getJSON(`/api/news${force ? "?refresh=true" : ""}`, 60000);
       const counts = d.sentiment || {};
@@ -1142,6 +1164,564 @@
       );
     } catch (err) {
       list.replaceChildren(h("li", { class: "muted small", text: `News unavailable: ${err.message}` }));
+    } finally {
+      button.disabled = false;
+      button.classList.remove("busy");
+      button.textContent = "Refresh";
+    }
+  }
+
+  function skeletonItems(n) {
+    return Array.from({ length: n }, () => h("li", { class: "skeleton-row", "aria-hidden": "true" }, h("span", { class: "skeleton" }), h("span", { class: "skeleton short" })));
+  }
+
+  // ---------------------------------------------------------------- Phase 5: market mood, on-chain, whales
+
+  const MOOD_TONE = { EXTREME_FEAR: "critical", FEAR: "serious", NEUTRAL: "neutral", GREED: "warning", EXTREME_GREED: "critical", UNKNOWN: "neutral" };
+  const COIN_MOOD_TONE = { POSITIVE: "good", NEGATIVE: "critical", MIXED: "warning", QUIET: "neutral" };
+  const FLOW_TONE = { exchange_inflow: "serious", exchange_outflow: "good", inter_exchange: "neutral", unknown: "neutral" };
+  const FLOW_LABEL = { exchange_inflow: "To exchange", exchange_outflow: "From exchange", inter_exchange: "Between exchanges", unknown: "Unlabelled" };
+  const fmtScore = (v) => (v == null ? DASH : (v > 0 ? "+" : v < 0 ? "−" : "") + Math.abs(v).toFixed(2));
+
+  function renderMood(s) {
+    const c = s.components || {};
+    const fg = c.fear_greed;
+    const funding = c.funding;
+    const news = c.news;
+    const stables = c.stablecoins;
+    $("mood-summary").replaceChildren(
+      h(
+        "div",
+        { class: "mood-head" },
+        toneBadge(MOOD_TONE[s.state] || "neutral", humanize(s.state)),
+        h("span", { class: "small", text: `score ${fmtScore(s.score)} (−1 fear … +1 greed)` }),
+        h("span", { class: "muted small", text: `trend ${humanize(s.trend).toLowerCase()}` }),
+      ),
+      h(
+        "dl",
+        { class: "detail-grid compact" },
+        kv("Fear & Greed", fg ? `${fg.value} ${fg.classification} · 7d avg ${fg.avg_7d} (${fg.change_7d > 0 ? "+" : ""}${fg.change_7d})` : DASH),
+        kv("Funding (avg)", funding ? `${funding.avg_pct_8h.toFixed(4)}% / 8h · ${funding.coins} coins` : DASH),
+        kv("Crowded longs", funding ? (funding.crowded_longs.length ? funding.crowded_longs.join(", ") : "none") : DASH),
+        kv("News tone 48h", news ? `${news.positive}+ / ${news.negative}− of ${news.headlines_48h}` : DASH),
+        kv("Stablecoins 7d", stables ? `${fmtPct(stables.change_7d_pct)} · ${fmtUsd(stables.total_usd)}` : DASH),
+      ),
+      h("p", { class: "muted small", text: "Context only: sentiment adds risk notes to signals, it never changes a label or score." }),
+    );
+    return s.errors || [];
+  }
+
+  function renderOnchain(o) {
+    const btc = o.btc || {};
+    const eth = o.eth || {};
+    const fees = btc.fees_sat_vb || {};
+    const gas = eth.gas_gwei || {};
+    const gwei = (v) => (v == null ? DASH : v.toFixed(v < 10 ? 2 : 0));
+    $("onchain-summary").replaceChildren(
+      h(
+        "dl",
+        { class: "detail-grid compact" },
+        kv("BTC fees", fees.halfHourFee == null ? DASH : `${fees.fastestFee} / ${fees.halfHourFee} / ${fees.hourFee} sat/vB`),
+        kv("BTC mempool", btc.mempool_tx_count == null ? DASH : `${fmtInt(btc.mempool_tx_count)} tx · ${btc.mempool_vsize_mb} MvB`),
+        kv("Hashrate", btc.hashrate_ehs == null ? DASH : `${fmtInt(btc.hashrate_ehs)} EH/s`),
+        kv("Next difficulty", btc.difficulty_change_pct == null ? DASH : `${fmtPct(btc.difficulty_change_pct)} in ${fmtInt(btc.blocks_to_retarget)} blocks`),
+        kv("ETH gas", gas.average == null ? DASH : `${gwei(gas.slow)} / ${gwei(gas.average)} / ${gwei(gas.fast)} gwei`),
+        kv("ETH usage", eth.network_utilization_pct == null ? DASH : `${eth.network_utilization_pct.toFixed(0)}% · ${fmtNum(eth.transactions_today)} tx today`),
+      ),
+    );
+    const flows = Object.entries(o.flows || {});
+    $("whale-count").textContent = `(${o.whales.length}${flows.length ? " · " + flows.map(([sym, f]) => `${sym} in ${fmtUsd(f.exchange_inflow)} / out ${fmtUsd(f.exchange_outflow)}`).join(" · ") : ""})`;
+    $("whale-list").replaceChildren(
+      ...(o.whales.length
+        ? o.whales.slice(0, 25).map((w) =>
+            h(
+              "li",
+              {},
+              h(
+                "div",
+                { class: "whale-row" },
+                h("strong", { text: `${fmtNum(w.amount)} ${w.symbol}` }),
+                h("span", { class: "muted", text: fmtUsd(w.amount_usd) }),
+                toneBadge(FLOW_TONE[w.classification] || "neutral", FLOW_LABEL[w.classification] || humanize(w.classification)),
+              ),
+              h(
+                "div",
+                { class: "news-sub" },
+                h("span", { text: `${w.from_label || "unknown"} → ${w.to_label || "unknown"}` }),
+                h("span", { text: fmtAgo(w.occurred_at) }),
+                w.url && /^https:\/\//.test(w.url) ? h("a", { href: w.url, target: "_blank", rel: "noopener noreferrer", text: w.source }) : h("span", { text: w.source }),
+              ),
+            ),
+          )
+        : [h("li", { class: "muted small", text: "No large transfers in the latest data." })]),
+    );
+    return o.errors || [];
+  }
+
+  let moodLoading = false;
+  let moodLoaded = false;
+
+  async function refreshMood(force = false) {
+    if (moodLoading) return;
+    moodLoading = true;
+    const button = $("mood-refresh");
+    button.disabled = true;
+    button.classList.add("busy");
+    if (!moodLoaded) $("mood-summary").replaceChildren(h("div", { class: "pad" }, ...skeletonItems(3).map((li) => h("div", { class: "skeleton-row" }, ...li.childNodes))));
+    const q = force ? "?refresh=true" : "";
+    // on-chain first: sentiment reuses its cached result instead of fetching twice
+    const onchain = await Promise.allSettled([getJSON(`/api/onchain${q}`, 60000)]);
+    const sentiment = await Promise.allSettled([getJSON(`/api/sentiment${q}`, 60000)]);
+    const errors = [];
+    let stamp = null;
+    if (sentiment[0].status === "fulfilled") {
+      errors.push(...renderMood(sentiment[0].value));
+      stamp = sentiment[0].value.computed_at;
+    } else {
+      $("mood-summary").replaceChildren(h("p", { class: "muted small", text: `Sentiment unavailable: ${sentiment[0].reason.message}` }));
+    }
+    let sources = [];
+    if (onchain[0].status === "fulfilled") {
+      errors.push(...renderOnchain(onchain[0].value));
+      sources = onchain[0].value.sources_ok;
+    } else {
+      $("onchain-summary").replaceChildren(h("p", { class: "muted small", text: `On-chain data unavailable: ${onchain[0].reason.message}` }));
+    }
+    const unique = [...new Set(errors)];
+    $("mood-meta").replaceChildren(
+      h("span", { text: `${stamp ? fmtTime(stamp) + " · " : ""}sources: alternative.me, Binance funding, news${sources.length ? ", " + sources.join(", ") : ""}` }),
+      ...(unique.length ? [h("span", { title: unique.join("\n"), text: `${unique.length} source(s) unavailable` })] : []),
+    );
+    button.disabled = false;
+    button.classList.remove("busy");
+    button.textContent = "Refresh";
+    moodLoaded = true;
+    moodLoading = false;
+  }
+
+  function sentimentCard(s) {
+    const funding = s.funding_rate_pct;
+    return card(
+      "Sentiment & flows",
+      "context only, never changes the signal",
+      h(
+        "dl",
+        { class: "detail-grid" },
+        kv("News (48h)", s.headlines ? h("span", {}, toneBadge(COIN_MOOD_TONE[s.state] || "neutral", humanize(s.state)), ` ${s.positive}+ / ${s.negative}− of ${s.headlines}`) : "no recent headlines"),
+        kv("Funding rate", funding == null ? "no perpetual on Binance" : `${funding.toFixed(4)}% per 8h`),
+        kv("Exchange flows", s.exchange_inflow_usd == null && s.exchange_outflow_usd == null
+          ? "no labelled transfers"
+          : `in ${fmtUsd(s.exchange_inflow_usd)} · out ${fmtUsd(s.exchange_outflow_usd)}`),
+      ),
+      s.notes.length ? plainList(s.notes, "small") : null,
+      s.recent_titles.length ? h("div", { class: "card-foot small muted" }, s.recent_titles.map((t) => h("div", { text: t }))) : null,
+    );
+  }
+
+  // ---------------------------------------------------------------- scalp signals (15m / 1h / 4h)
+
+  let scalpHorizon = "1h";
+  const scalpSeen = {};
+  const scalpOpen = new Set();
+
+  function fmtR(v) {
+    return v == null ? DASH : `${v > 0 ? "+" : v < 0 ? "−" : ""}${Math.abs(v).toFixed(2)}R`;
+  }
+
+  function backtestText(bt) {
+    if (!bt || !bt.trades) return "no trades";
+    return `${bt.trades} tr · ${Math.round(bt.win_rate)}% · ${fmtR(bt.expectancy_r)}`;
+  }
+
+  function scalpDetail(sig) {
+    const bt = sig.backtest;
+    const parts = [];
+    if (sig.plan) {
+      const p = sig.plan;
+      parts.push(h("dl", { class: "detail-grid compact" },
+        kv("Buy zone", `${fmtPrice(p.entry_low)} to ${fmtPrice(p.entry_high)}`),
+        kv("Stop", `${fmtPrice(p.stop)} (−${p.risk_pct.toFixed(2)}%)`),
+        kv("Net R:R", `${p.reward_risk_tp1.toFixed(2)} at TP1 · ${p.reward_risk_tp2.toFixed(2)} at TP2`),
+        kv("Size", `${p.suggested_allocation_pct.toFixed(1)}% of portfolio (risks ${p.risk_at_allocation_pct.toFixed(2)}%)`),
+        kv("Costs", `${p.cost_pct.toFixed(2)}% round trip`),
+        kv("Valid until", `${fmtTime(p.valid_until)} · ${p.time_exit}`),
+      ));
+    }
+    if (sig.expected && sig.expected.risk_per_trade) {
+      const e = sig.expected;
+      parts.push(h("p", { class: "small pad expected" },
+        `At your settings you risk ${fmtUsd(e.risk_per_trade)} per trade. Measured average: ${fmtR(e.expectancy_r)} ≈ `,
+        h("strong", { text: `${e.expected_per_trade >= 0 ? "+" : "−"}$${Math.abs(e.expected_per_trade).toFixed(2)} per trade` }),
+        e.trades_per_day ? ` · about ${e.trades_per_day} setups a day on this coin` : "",
+        ` (${e.note}).`,
+      ));
+    } else if (sig.expected) {
+      parts.push(h("p", { class: "small pad muted", text: "Enter your cash in Portfolio to see the measured average in dollars per trade." }));
+    }
+    parts.push(h("div", { class: "pad" }, h("strong", { class: "small", text: "Why" }), plainList(sig.reasons, "small")));
+    if (sig.risks.length) parts.push(h("div", { class: "pad" }, h("strong", { class: "small", text: "Risks" }), plainList(sig.risks, "small")));
+    if (bt && bt.trades) {
+      const outcomes = Object.entries(bt.outcomes).map(([k, v]) => `${humanize(k)} ${v}`).join(" · ");
+      const setups = Object.entries(bt.by_setup).filter(([, v]) => v.trades).map(([k, v]) => `${k}: ${v.trades} trades, ${fmtR(v.expectancy_r)}`).join(" · ");
+      parts.push(h("dl", { class: "detail-grid compact" },
+        kv("Backtest", `${bt.days} days of ${bt.setup_timeframe} candles`),
+        kv("Win rate", `${Math.round(bt.win_rate)}% of ${bt.trades}`),
+        kv("Expectancy", `${fmtR(bt.expectancy_r)} per trade`),
+        kv("Profit factor", bt.no_losses ? "no losses" : bt.profit_factor == null ? DASH : bt.profit_factor.toFixed(2)),
+        kv("Max drawdown", fmtR(-bt.max_drawdown_r)),
+        kv("Exits", outcomes),
+        kv("By setup", setups || DASH),
+      ));
+      if (bt.recent.length) {
+        parts.push(h("div", { class: "pad recent-trades" },
+          h("span", { class: "small muted", text: "Last backtest trades: " }),
+          ...bt.recent.slice(-10).map((t) => h("span", { class: `r-chip ${t.r_multiple > 0 ? "pos" : "neg"}`, title: `${t.kind} · ${new Date(t.entry_time).toLocaleString()} · ${humanize(t.outcome)}`, text: fmtR(t.r_multiple) })),
+        ));
+      }
+    }
+    return parts;
+  }
+
+  function scalpRows(sig) {
+    const open = scalpOpen.has(sig.symbol);
+    const toggle = () => {
+      if (scalpOpen.has(sig.symbol)) scalpOpen.delete(sig.symbol); else scalpOpen.add(sig.symbol);
+      renderScalp(lastScalp);
+    };
+    const p = sig.plan;
+    const actionable = sig.signal === "BUY" || sig.signal === "STRONG BUY";
+    const planCls = actionable ? "num" : "num muted";
+    const row = h(
+      "tr",
+      { class: `clickable${open ? " open" : ""}`, onclick: toggle, "aria-expanded": open ? "true" : "false" },
+      h("td", {}, h("div", { class: "asset-cell" }, h("strong", { text: sig.symbol }), h("span", { class: "muted small", text: sig.name }))),
+      h("td", {}, signalBadge(sig.signal, null)),
+      h("td", { class: "hide-sm", text: sig.setup ? humanize(sig.setup) : DASH }),
+      h("td", { class: planCls, text: p ? fmtPrice(p.entry) : DASH }),
+      h("td", { class: planCls }, p ? fmtPrice(p.stop) : DASH, p ? h("div", { class: "muted small", text: `−${p.risk_pct.toFixed(2)}%` }) : null),
+      h("td", { class: planCls }, p ? fmtPrice(p.tp1) : DASH, p ? h("div", { class: "muted small", text: fmtPrice(p.tp2) }) : null),
+      h("td", { class: "num", title: sig.evidence === "pooled" ? "coin has too few trades: pooled record of all scanned coins decides" : null },
+        backtestText(sig.backtest), sig.evidence === "pooled" ? h("div", { class: "muted small", text: "pooled" }) : null),
+      h("td", { class: "hide-sm" }, h("span", { class: "reason", text: sig.reasons[0] || "" })),
+    );
+    if (!open) return [row];
+    return [row, h("tr", { class: "detail-row" }, h("td", { colspan: 8 }, h("div", { class: "scalp-detail" }, ...scalpDetail(sig))))];
+  }
+
+  let lastScalp = null;
+
+  function renderScalp(res) {
+    lastScalp = res;
+    const rows = $("scalp-rows");
+    if (!res) {
+      rows.replaceChildren(h("tr", {}, h("td", { colspan: 8, class: "empty", text: "No scan yet for this horizon. Press “Find scalps”." })));
+      $("scalp-meta").textContent = "";
+      $("scalp-pooled").hidden = true;
+      return;
+    }
+    const c = res.counts;
+    $("scalp-meta").textContent = `${res.label}: setup ${res.setup_timeframe}, trend ${res.trend_timeframe}, filter ${res.filter_timeframe} · `
+      + `${c["STRONG BUY"] + c.BUY} buy, ${c.WATCH} watch · ${fmtTime(res.generated_at)}`;
+    const pool = res.pooled;
+    if (pool && pool.trades) {
+      $("scalp-pooled").textContent = `Same rules across ${pool.coins} coins, ${pool.days} days: ${pool.trades} trades, win rate ${Math.round(pool.win_rate)}%, `
+        + `expectancy ${fmtR(pool.expectancy_r)}, profit factor ${pool.no_losses ? "no losses" : pool.profit_factor == null ? DASH : pool.profit_factor.toFixed(2)} `
+        + `(net of ${res.cost_pct.toFixed(2)}% costs).`;
+      $("scalp-pooled").hidden = false;
+    } else {
+      $("scalp-pooled").hidden = true;
+    }
+    const err = $("scalp-error");
+    if (res.errors.length) setMessage(err, "Some coins could not be analysed", res.errors.slice(0, 5)); else err.hidden = true;
+    rows.replaceChildren(...(res.signals.length ? res.signals.flatMap(scalpRows)
+      : [h("tr", {}, h("td", { colspan: 8, class: "empty", text: "No coins analysed (check Coins to analyse)." }))]));
+  }
+
+  async function refreshScalp() {
+    const horizon = scalpHorizon;
+    try {
+      const r = await getJSON(`/api/scalp?horizon=${horizon}`);
+      if (horizon !== scalpHorizon) return; // the user switched horizon while this was loading
+      renderScalp(r.result);
+      renderScalpStatus(r.status);
+    } catch (err) {
+      if (horizon === scalpHorizon) setMessage($("scalp-error"), `Scalp signals unavailable: ${err.message}`);
+    }
+  }
+
+  function renderScalpStatus(all) {
+    if (!all) return;
+    const st = all[scalpHorizon];
+    const button = $("scalp-scan");
+    button.disabled = !!(st && st.running);
+    button.textContent = st && st.running ? "Scanning…" : "Find scalps";
+    let text = "";
+    if (st) {
+      if (st.running) text = `Backtesting and scanning… ${st.done}/${st.total || "?"}`;
+      else if (st.outcome === "stopped") text = `Stopped ${fmtTime(st.finished_at)}`;
+      else if (st.outcome === "failed") text = `Scan failed: ${st.error || "unknown error"}`;
+    }
+    $("scalp-status").textContent = text;
+    $("scalp-progress").style.width = st && st.running && st.total ? `${(st.done / st.total) * 100}%` : "0%";
+    for (const [key, value] of Object.entries(all)) {
+      const seen = scalpSeen[key];
+      if (value.finished_at && seen !== undefined && seen !== value.finished_at && key === scalpHorizon) {
+        refreshScalp();
+        refreshRecord();
+      }
+      scalpSeen[key] = value.finished_at;
+    }
+  }
+
+  function setHorizon(key) {
+    scalpHorizon = key;
+    renderScalp(null); // clear the other horizon's rows at once
+    pref("scalpHorizon", key);
+    document.querySelectorAll(".segmented [data-horizon]").forEach((b) => b.setAttribute("aria-checked", b.dataset.horizon === key ? "true" : "false"));
+    scalpOpen.clear();
+    refreshScalp();
+  }
+
+  async function startScalp() {
+    try {
+      const r = await api(`/api/scalp/scan?horizon=${scalpHorizon}`, { method: "POST" });
+      renderScalpStatus(r.status);
+      scheduleControl(1000);
+    } catch (err) {
+      setMessage($("scalp-error"), `Could not start the scan: ${err.message}`);
+    }
+  }
+
+  // ---------------------------------------------------------------- track record
+
+  async function refreshRecord() {
+    const body = $("record-body");
+    try {
+      const d = await getJSON("/api/performance?days=90");
+      if (!d.strategies.length) {
+        body.replaceChildren(h("p", { class: "muted small pad", text: d.persistence === "ok"
+          ? "No buy signals tracked yet. Every BUY from now on (swing and scalp) is followed here until it hits its stop, targets or time limit."
+          : "The track record needs the database." }));
+        return;
+      }
+      body.replaceChildren(
+        table(
+          [["Strategy"], ["Closed", "num"], ["Win rate", "num"], ["Avg", "num"], ["Total", "num hide-sm"], ["PF", "num hide-sm"], ["Open", "num"]],
+          d.strategies.map((st) => h("tr", {},
+            h("td", {}, h("strong", { text: st.label })),
+            h("td", { class: "num", text: st.closed }),
+            h("td", { class: "num", text: st.win_rate == null ? DASH : `${Math.round(st.win_rate)}%` }),
+            h("td", { class: `num ${st.avg_r > 0 ? "pnl-up" : st.avg_r < 0 ? "pnl-down" : ""}`, text: fmtR(st.avg_r) }),
+            h("td", { class: "num hide-sm", text: fmtR(st.total_r) }),
+            h("td", { class: "num hide-sm", text: st.profit_factor == null ? DASH : st.profit_factor.toFixed(2) }),
+            h("td", { class: "num", title: st.skipped ? `${st.skipped} overlapping signals not counted` : null, text: st.open }),
+          )),
+        ),
+        d.recent.length ? h("div", { class: "pad recent-trades" },
+          h("span", { class: "small muted", text: "Latest: " }),
+          ...d.recent.slice(0, 12).map((t) => h("span", {
+            class: `r-chip ${t.r_multiple > 0 ? "pos" : "neg"}`,
+            title: `${t.symbol} · ${t.label} · ${t.signal} · ${new Date(t.created_at).toLocaleString()} · ${humanize(t.outcome)} after ${t.hours} h`,
+            text: `${t.symbol} ${fmtR(t.r_multiple)}`,
+          })),
+        ) : h("p", { class: "muted small pad", text: "No finished trades yet." }),
+      );
+    } catch (err) {
+      body.replaceChildren(h("p", { class: "muted small pad", text: `Track record unavailable: ${err.message}` }));
+    }
+  }
+
+  // ---------------------------------------------------------------- coins to analyse (selection)
+
+  let selectionState = null; // { mode, symbols:Set, universe:[...] }
+  let selectionDraft = null; // Set of symbols being edited
+
+  function isSelected(symbol) {
+    return !selectionState || selectionState.mode === "all" || selectionState.symbols.has(symbol);
+  }
+
+  function describeSelection() {
+    if (!selectionState) return "All coins";
+    if (selectionState.mode === "all") return `All coins (${selectionState.universe.length || "Top 20 + watchlist"})`;
+    const list = [...selectionState.symbols];
+    return `${list.length} selected: ${list.slice(0, 6).join(", ")}${list.length > 6 ? "…" : ""}`;
+  }
+
+  function renderSelection() {
+    const st = selectionState;
+    $("selection-summary").textContent = describeSelection();
+    $("selection-summary").classList.toggle("active", !!st && st.mode === "selected");
+    if (!st) return;
+    const draft = selectionDraft;
+    $("selection-count").textContent = `${draft.size} of ${st.universe.length} selected`;
+    $("selection-chips").replaceChildren(
+      ...(st.universe.length
+        ? st.universe.map((u) => h(
+            "button",
+            {
+              type: "button", class: `select-chip${u.supported ? "" : " unsupported"}`, "aria-pressed": draft.has(u.symbol) ? "true" : "false",
+              title: `${u.name}${u.watchlist ? " (watchlist)" : ""}${u.supported ? "" : " - no spot market"}`,
+              onclick: () => {
+                if (draft.has(u.symbol)) draft.delete(u.symbol); else draft.add(u.symbol);
+                renderSelection();
+              },
+            },
+            h("span", { class: "chip-rank", text: u.watchlist ? "★" : `#${u.rank}` }),
+            u.symbol,
+          ))
+        : [h("span", { class: "muted small", text: "Load market data first (Refresh data)." })]),
+    );
+  }
+
+  async function loadSelection() {
+    try {
+      const r = await getJSON("/api/control/selection");
+      selectionState = { mode: r.mode, symbols: new Set(r.symbols), universe: r.universe };
+      selectionDraft = new Set(r.universe.filter((u) => u.selected).map((u) => u.symbol));
+      if (r.mode === "selected") r.symbols.forEach((s) => selectionDraft.add(s));
+      renderSelection();
+      $("market-rows").querySelectorAll("tr").forEach((tr) => {
+        const btn = tr.querySelector(".link-button");
+        if (btn) tr.classList.toggle("deselected", !isSelected(btn.textContent.trim()));
+      });
+    } catch {
+      /* selection is optional; scans then cover every coin */
+    }
+  }
+
+  async function saveSelection() {
+    if (!selectionState) return;
+    const all = selectionState.universe.every((u) => selectionDraft.has(u.symbol));
+    const body = all ? { mode: "all", symbols: [] } : { mode: "selected", symbols: [...selectionDraft] };
+    const button = $("sel-save");
+    button.disabled = true;
+    try {
+      const r = await api("/api/control/selection", { method: "PUT", body });
+      selectionState = { mode: r.mode, symbols: new Set(r.symbols), universe: r.universe };
+      renderSelection();
+      await loadSelection();
+      button.textContent = "Saved ✓";
+      setTimeout(() => { button.textContent = "Save selection"; }, 1500);
+    } catch (err) {
+      window.alert(err.message);
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  function presetSelection(kind) {
+    if (!selectionState) return;
+    const ranked = selectionState.universe.filter((u) => !u.watchlist && u.supported);
+    if (kind === "all") selectionDraft = new Set(selectionState.universe.map((u) => u.symbol));
+    else if (kind === "none") selectionDraft = new Set();
+    else selectionDraft = new Set(ranked.slice(0, kind).map((u) => u.symbol));
+    renderSelection();
+  }
+
+  // ---------------------------------------------------------------- token unlocks, airdrops
+
+  let unlocksLoaded = false;
+  let eventsLoading = false;
+
+  function unlockItem(c) {
+    const next = c.next_unlock;
+    const pct = c.window_pct_circulating;
+    const tone = pct == null ? "neutral" : pct >= 2 ? "critical" : pct >= 1 ? "serious" : pct > 0 ? "warning" : "neutral";
+    const allocs = next ? Object.entries(next.allocations).map(([k, v]) => `${k} ${fmtNum(v)}`).join(" · ") : "";
+    return h(
+      "li",
+      {},
+      h(
+        "div",
+        { class: "whale-row" },
+        h("strong", { text: c.symbol }),
+        toneBadge(tone, pct == null ? "supply n/a" : `${pct.toFixed(2)}% of supply`),
+        h("span", { class: "muted", text: c.window_value_usd ? fmtUsd(c.window_value_usd) : "" }),
+      ),
+      next
+        ? h(
+            "div",
+            { class: "news-sub" },
+            h("span", { text: `next ${new Date(next.date).toLocaleDateString()} (in ${Math.max(0, Math.round(next.days_until))} d)` }),
+            h("span", { text: `${fmtNum(next.tokens)} tokens` }),
+            allocs ? h("span", { text: allocs }) : null,
+          )
+        : null,
+    );
+  }
+
+  function renderUnlocks(d) {
+    const panel = $("unlocks-panel");
+    if (!d.configured) {
+      panel.replaceChildren(h("p", { class: "muted small pad", text: d.message }));
+      return;
+    }
+    const soon = d.coins.filter((c) => c.window_tokens > 0);
+    const later = d.coins.filter((c) => !(c.window_tokens > 0));
+    panel.replaceChildren(...[
+      h("p", { class: "muted small pad", text: `${d.checked.length} coins checked · next ${d.window_days} days · ${fmtTime(d.fetched_at)}${d.errors.length ? ` · ${d.errors.length} not found` : ""}` }),
+      h("ul", { class: "news-list" },
+        ...(soon.length ? soon.map(unlockItem) : [h("li", { class: "muted small", text: `No unlocks in the next ${d.window_days} days for the analysed coins.` })])),
+      later.length ? h("details", { class: "whales" }, h("summary", { class: "small", text: `Later unlocks (${later.length})` }), h("ul", { class: "news-list" }, ...later.map(unlockItem))) : null,
+      h("p", { class: "muted small pad", text: "Unlocks of 1%+ of circulating supply within 14 days are added to that coin's risk notes." }),
+    ].filter(Boolean));
+  }
+
+  const DROP_TONE = { active: "good", claimable: "warning", upcoming: "neutral" };
+
+  function renderAirdrops(d) {
+    const panel = $("airdrops-panel");
+    if (!d.configured) {
+      panel.replaceChildren(h("p", { class: "muted small pad", text: d.message }));
+      return;
+    }
+    panel.replaceChildren(...[
+      h("ul", { class: "news-list" },
+        ...(d.airdrops.length
+          ? d.airdrops.map((a) => h(
+              "li",
+              {},
+              h("div", { class: "whale-row" },
+                a.url ? h("a", { href: a.url, target: "_blank", rel: "noopener noreferrer", text: a.name }) : h("strong", { text: a.name }),
+                a.status ? toneBadge(DROP_TONE[a.status.toLowerCase()] || "neutral", humanize(a.status)) : null),
+              h("div", { class: "news-sub" },
+                a.chains.length ? h("span", { text: a.chains.join(" · ") }) : null,
+                a.reward ? h("span", { text: `reward ${a.reward}` }) : null,
+                a.cost ? h("span", { text: `cost ${a.cost}` }) : null,
+                a.ends_at ? h("span", { text: `ends ${new Date(a.ends_at).toLocaleDateString()}` }) : null),
+            ))
+          : [h("li", { class: "muted small", text: "No airdrops returned." })])),
+      d.errors.length ? h("p", { class: "muted small pad", title: d.errors.join("\n"), text: `${d.errors.length} request(s) failed` }) : null,
+      h("p", { class: "muted small pad", text: "Airdrops are unverified third-party listings: never connect a wallet or pay fees you do not understand." }),
+    ].filter(Boolean));
+  }
+
+  async function refreshEvents(force = false, quiet = false) {
+    if (eventsLoading) return;
+    eventsLoading = true;
+    const button = $("events-refresh");
+    button.disabled = true;
+    button.classList.add("busy");
+    const q = force ? "?refresh=true" : "";
+    const [unlocks, drops] = await Promise.allSettled([
+      getJSON(`/api/events/unlocks${q}`, 90000), quiet ? Promise.reject(new Error("skipped")) : getJSON(`/api/events/airdrops${q}`, 60000),
+    ]);
+    if (unlocks.status === "fulfilled") renderUnlocks(unlocks.value);
+    else $("unlocks-panel").replaceChildren(h("p", { class: "muted small pad", text: `Unlocks unavailable: ${unlocks.reason.message}` }));
+    if (drops.status === "fulfilled") renderAirdrops(drops.value);
+    else if (!quiet) $("airdrops-panel").replaceChildren(h("p", { class: "muted small pad", text: `Airdrops unavailable: ${drops.reason.message}` }));
+    unlocksLoaded = true;
+    button.disabled = false;
+    button.classList.remove("busy");
+    button.textContent = "Refresh";
+    eventsLoading = false;
+  }
+
+  function selectTab(which) {
+    for (const name of ["unlocks", "airdrops"]) {
+      const on = name === which;
+      $(`tab-${name}`).setAttribute("aria-selected", on ? "true" : "false");
+      $(`${name}-panel`).hidden = !on;
     }
   }
 
@@ -1176,13 +1756,51 @@
     const symbol = $("chat-symbol").value || null;
     try {
       const history = chatMessages.filter((m) => !m.error).map(({ role, content }) => ({ role, content })).slice(-16);
-      const r = await api("/api/chat", { method: "POST", body: { messages: history, symbol }, timeoutMs: 120000 });
-      chatMessages.push({ role: "assistant", content: r.reply, meta: `${r.model}${symbol ? ` · focus ${symbol}` : ""}` });
+      const model = $("chat-model").value || null;
+      const effort = $("chat-effort").value || null;
+      const r = await api("/api/chat", {
+        method: "POST", body: { messages: history, symbol, model, reasoning_effort: effort }, timeoutMs: 180000,
+      });
+      const fell = r.fallback_from && r.fallback_from.length ? ` · fallback (${r.fallback_from.join("; ")})` : "";
+      chatMessages.push({ role: "assistant", content: r.reply, meta: `${r.model}${symbol ? ` · focus ${symbol}` : ""}${fell}` });
     } catch (err) {
       chatMessages.push({ role: "assistant", content: `Chat unavailable: ${err.message}`, error: true });
     } finally {
       chatBusy = false;
       renderChat();
+    }
+  }
+
+  const DEFAULT_MODELS = ["gpt-5-mini", "gpt-4o-mini", "gpt-5", "gpt-5-nano", "gpt-4.1-mini", "gpt-4.1", "gpt-4o", "o4-mini"];
+
+  function fillModels(list, defaultId) {
+    const select = $("chat-model");
+    const saved = pref("chatModel") || "";
+    select.replaceChildren(
+      h("option", { value: "", text: `Default (${defaultId || "server"})` }),
+      ...list.map((m) => h("option", {
+        value: m.id,
+        text: `${m.id}${m.reasoning ? " · reasoning" : ""}${m.available === false ? " · not on this key" : ""}`,
+        disabled: m.available === false,
+      })),
+    );
+    if ([...select.options].some((o) => o.value === saved && !o.disabled)) select.value = saved;
+    syncEffort();
+  }
+
+  function syncEffort() {
+    const id = $("chat-model").value;
+    const reasoning = !id || /^(gpt-5|o\d)/.test(id);
+    $("chat-effort").disabled = !reasoning;
+    $("chat-effort").title = reasoning ? "Reasoning effort: lower is faster and cheaper" : "This model does not use reasoning effort";
+  }
+
+  async function loadChatModels() {
+    try {
+      const r = await getJSON("/api/chat/models");
+      fillModels(r.models, r.default);
+    } catch {
+      fillModels(DEFAULT_MODELS.map((id) => ({ id, reasoning: /^(gpt-5|o\d)/.test(id), available: null })), null);
     }
   }
 
@@ -1465,6 +2083,7 @@
       e.preventDefault();
       try {
         renderWatchlist((await api("/api/watchlist", { method: "POST", body: { symbol: $("watch-symbol").value } })).items);
+        loadSelection();
         $("watch-symbol").value = "";
       } catch (err) {
         window.alert(err.message);
@@ -1472,8 +2091,43 @@
     });
     getJSON("/api/watchlist").then((w) => renderWatchlist(w.items)).catch(() => renderWatchlist([]));
 
-    $("news-refresh").addEventListener("click", () => refreshNews(true));
-    refreshNews();
+    // News, mood and events load only when asked (or when their "Load when the page opens" box is ticked).
+    $("news-refresh").addEventListener("click", () => refreshNews($("news-refresh").textContent === "Refresh"));
+    $("news-auto").checked = pref("newsAuto") === "1";
+    $("news-auto").addEventListener("change", (e) => pref("newsAuto", e.target.checked ? "1" : "0"));
+    if ($("news-auto").checked) refreshNews();
+
+    $("mood-refresh").addEventListener("click", () => refreshMood(moodLoaded));
+    $("mood-auto").checked = pref("moodAuto") === "1";
+    $("mood-auto").addEventListener("change", (e) => pref("moodAuto", e.target.checked ? "1" : "0"));
+    if ($("mood-auto").checked) refreshMood();
+
+    $("events-refresh").addEventListener("click", () => refreshEvents(unlocksLoaded));
+    $("tab-unlocks").addEventListener("click", () => selectTab("unlocks"));
+    $("tab-airdrops").addEventListener("click", () => selectTab("airdrops"));
+
+    const savedHorizon = pref("scalpHorizon");
+    document.querySelectorAll(".segmented [data-horizon]").forEach((b) => b.addEventListener("click", () => setHorizon(b.dataset.horizon)));
+    setHorizon(savedHorizon === "15m" || savedHorizon === "4h" ? savedHorizon : "1h");
+    $("scalp-scan").addEventListener("click", startScalp);
+    $("record-refresh").addEventListener("click", refreshRecord);
+    refreshRecord();
+
+    $("sel-all").addEventListener("click", () => presetSelection("all"));
+    $("sel-none").addEventListener("click", () => presetSelection("none"));
+    $("sel-top5").addEventListener("click", () => presetSelection(5));
+    $("sel-top10").addEventListener("click", () => presetSelection(10));
+    $("sel-save").addEventListener("click", saveSelection);
+    $("selection-box").addEventListener("toggle", (e) => { if (e.target.open) loadSelection(); });
+    loadSelection();
+
+    $("chat-model").addEventListener("change", (e) => { pref("chatModel", e.target.value); syncEffort(); });
+    $("chat-effort").value = pref("chatEffort") || "";
+    $("chat-effort").addEventListener("change", (e) => pref("chatEffort", e.target.value));
+    loadChatModels();
+
+    $("year").textContent = String(new Date().getFullYear());
+    document.querySelectorAll("main .card").forEach((el, i) => el.style.setProperty("--i", String(Math.min(i, 12))));
 
     try {
       chatMessages = JSON.parse(sessionStorage.getItem("chat") || "[]");

@@ -6,7 +6,6 @@ stored portfolio. Only an explicitly selected coin is analysed on demand.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
 
@@ -37,6 +36,9 @@ async def chat_context(
     portfolio: PortfolioService,
     watchlist: WatchlistService,
     symbol: str | None,
+    sentiment: Any = None,
+    onchain: Any = None,
+    events: Any = None,
 ) -> dict[str, Any]:
     ctx: dict[str, Any] = {"now_utc": utcnow().isoformat(), "watchlist": watchlist.symbols()}
     symbols: set[str] = set()
@@ -66,12 +68,7 @@ async def chat_context(
         }
         symbols.update(r.symbol for r in scan.signals)
 
-    digest = news.cached()
-    if digest is None:
-        try:
-            digest = await asyncio.wait_for(news.digest(), timeout=15)
-        except Exception as exc:  # news is optional context
-            log.info("news unavailable for chat", extra={"error": str(exc)})
+    digest = news.cached()  # news loads only when the user asks for it
     if digest is not None:
         ctx["news"] = {
             "fetched_at": digest.fetched_at.isoformat(),
@@ -82,6 +79,36 @@ async def chat_context(
                 for n in digest.items[:15]
             ],
             "trending_coingecko": [t.symbol for t in digest.trending[:10]],
+        }
+
+    mood = sentiment.cached() if sentiment is not None else None
+    if mood is not None:
+        ctx["market_sentiment"] = {
+            "state": mood.state, "score_-1_to_1": mood.score, "trend": mood.trend, "reasons": mood.reasons,
+            "crowded_longs_funding": mood.components.get("funding", {}).get("crowded_longs"),
+            "coins_with_notes": {s: a.notes for s, a in mood.assets.items() if a.notes},
+        }
+    chain = onchain.cached() if onchain is not None else None
+    if chain is not None:
+        ctx["onchain"] = {
+            "fetched_at": chain.fetched_at.isoformat(), "btc_network": chain.btc, "eth_network": chain.eth,
+            "stablecoin_supply": chain.stablecoins, "labelled_exchange_flows_usd": chain.flows,
+            "largest_transfers": [
+                {"symbol": w.symbol, "amount": _r(w.amount), "usd": _r(w.amount_usd), "type": w.classification,
+                 "from": w.from_label, "to": w.to_label, "time": w.occurred_at.isoformat()}
+                for w in chain.whales[:10]
+            ],
+        }
+
+    unlocks = events.cached_unlocks() if events is not None else None
+    if unlocks is not None and unlocks.coins:
+        ctx["token_unlocks_next_days"] = {
+            "window_days": unlocks.window_days,
+            "coins": [
+                {"symbol": c.symbol, "pct_of_circulating": c.window_pct_circulating, "usd": _r(c.window_value_usd),
+                 "next": c.next_unlock.date.isoformat() if c.next_unlock else None}
+                for c in unlocks.coins[:10]
+            ],
         }
 
     ctx["portfolio"] = {
@@ -104,6 +131,7 @@ async def chat_context(
                 "symbol": a.symbol, "name": a.name, "signal": a.signal.value, "score": a.score,
                 "summary": a.summary, "reasons": a.reasons, "risks": a.risks, "trend": a.trend,
                 "price": _r(a.price), "quote": a.quote_asset, "data_state": a.data_state.value,
+                "sentiment": a.sentiment,
                 "failed_risk_checks": [f"{c.name} ({c.severity.value}): {c.detail}" for c in a.risk_checks if not c.passed],
                 "plan": None if plan is None else {
                     "actionable": plan.actionable, "entry_low": _r(plan.entry_low), "entry_high": _r(plan.entry_high),

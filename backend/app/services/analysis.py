@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict, replace
 from typing import Any
 
@@ -26,6 +26,7 @@ from app.analysis.scoring import SignalParams
 from app.config import Settings
 from app.core.enums import SignalLabel, Timeframe
 from app.core.timeutil import utcnow
+from app.data.normalization.schemas import Candle
 from app.risk.params import RiskParams
 from app.schemas.api import (
     AnalysisOut,
@@ -107,6 +108,8 @@ def regime_out(m: MarketRegimeResult) -> MarketRegimeOut:
         flags=list(m.flags),
         reasons=list(m.reasons),
         errors=list(m.errors),
+        btc_trend_4h=m.btc_trend_4h,
+        btc_rsi_4h=m.btc_rsi_4h,
     )
 
 
@@ -142,7 +145,7 @@ def _structure_out(r: AnalysisResult) -> list[StructureOut]:
     return out
 
 
-def analysis_out(r: AnalysisResult, persistence_status: str) -> AnalysisOut:
+def analysis_out(r: AnalysisResult, persistence_status: str, sentiment: dict[str, Any] | None = None) -> AnalysisOut:
     ordered = sorted(r.snapshots, key=lambda t: t.seconds)
     return AnalysisOut(
         generated_at=r.generated_at,
@@ -190,6 +193,7 @@ def analysis_out(r: AnalysisResult, persistence_status: str) -> AnalysisOut:
         ],
         market_regime=regime_out(r.market),
         persistence=persistence_status,
+        sentiment=sentiment,
     )
 
 
@@ -263,6 +267,15 @@ class AnalysisService:
         self._cache = AsyncTTLCache()
         self._last_signal: dict[str, tuple[str, str | None]] = {}
         self._feature_timeframes = {Timeframe(value) for value in settings.feature_persist_timeframes}
+        # Phase 5 context hooks (set by the container): sentiment per coin, refreshed before scans.
+        self.sentiment_for: Callable[[str], Any] | None = None
+        # which universe coins a scan analyses (the user's selection); None = all
+        self.scan_filter: Callable[[list[UniverseAsset]], list[UniverseAsset]] | None = None
+        # risk notes from scheduled events (token unlocks), read from a cache; never fetches
+        self.event_notes: Callable[[str], list[str]] | None = None
+        # the track record follows earlier signals with the candles this analysis fetched
+        self.on_candles: Callable[[str, dict[Timeframe, list[Candle]]], Awaitable[Any]] | None = None
+        self.before_scan: Callable[[], Awaitable[Any]] | None = None
 
     @property
     def risk_params(self) -> RiskParams:
@@ -288,9 +301,21 @@ class AnalysisService:
         collection = await self._assets.collect(symbol)
         market = await self._regime.current()
         result = self._engine.evaluate(self._inputs(collection, market))
+        sentiment = self.sentiment_for(result.symbol) if self.sentiment_for else None
+        if sentiment is not None:
+            # Context only: notes join the risks, the label and score stay the engine's.
+            result.risks.extend(f"sentiment: {note}" for note in sentiment.notes)
+        if self.event_notes is not None:
+            result.risks.extend(self.event_notes(result.symbol))
         if result.signal in (SignalLabel.BUY, SignalLabel.STRONG_BUY):
             log.info("signal", extra={"symbol": result.symbol, "signal": result.signal.value, "score": result.score})
-        return analysis_out(result, await self._persist(result))
+        persisted = await self._persist(result)
+        if self.on_candles is not None and Timeframe.H1 in collection.closed:
+            try:
+                await self.on_candles(result.symbol, {Timeframe.H1: collection.closed[Timeframe.H1]})
+            except Exception:  # the track record must never break an analysis
+                log.exception("track record update failed", extra={"symbol": result.symbol})
+        return analysis_out(result, persisted, asdict(sentiment) if sentiment is not None else None)
 
     @staticmethod
     def _inputs(c: AssetCollection, market: MarketRegimeResult) -> AnalysisInputs:
@@ -323,11 +348,19 @@ class AnalysisService:
         on_progress: Callable[[str], None] | None = None,
     ) -> SignalScanOut:
         """Analyse the whole universe now. Runs only when called (Analyze now / auto schedule)."""
+        if self.before_scan is not None:
+            try:
+                await asyncio.wait_for(self.before_scan(), timeout=60)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # sentiment is context; a scan never fails because of it
+                log.warning("sentiment refresh before scan failed", exc_info=True)
         universe = await self._universe.get(force=force)
         market = await self._regime.current(force=force)
         semaphore = asyncio.Semaphore(max(1, self._s.signal_scan_concurrency))
+        chosen = self.scan_filter(universe.assets) if self.scan_filter is not None else universe.assets
         if on_start:
-            on_start(len(universe.assets))
+            on_start(len(chosen))
 
         async def one(asset: UniverseAsset) -> tuple[SignalSummaryOut, str | None]:
             async with semaphore:
@@ -344,7 +377,7 @@ class AnalysisService:
                     on_progress(asset.symbol)
                 return row
 
-        outcomes = await asyncio.gather(*(one(a) for a in universe.assets))
+        outcomes = await asyncio.gather(*(one(a) for a in chosen))
         rows = sorted(
             (row for row, _ in outcomes), key=lambda r: (-r.signal.rank, -r.score, r.universe_rank)
         )
@@ -356,7 +389,8 @@ class AnalysisService:
             market_regime=regime_out(market),
             counts={label.value: counts.get(label.value, 0) for label in SignalLabel},
             signals=rows,
-            errors=[error for _, error in outcomes if error],
+            errors=[error for _, error in outcomes if error]
+            + ([] if chosen else ["none of the selected coins is in the current universe: pick coins in 'Coins to analyse'"]),
         )
 
     # ------------------------------------------------------------------ persistence

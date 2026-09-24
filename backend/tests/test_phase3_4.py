@@ -189,6 +189,7 @@ async def test_chat_uses_openai_with_context_and_falls_back_to_the_second_model(
     http, c = app_env
     calls: list = []
     c.chat._http = httpx.AsyncClient(transport=httpx.MockTransport(openai_handler(calls)))
+    await http.get("/api/news")  # news is loaded manually; chat only reads the cache
     r = await http.post("/api/chat", json={"messages": [{"role": "user", "content": "Is BTC a buy?"}], "symbol": "btc"})
     assert r.status_code == 200, r.text
     body = r.json()

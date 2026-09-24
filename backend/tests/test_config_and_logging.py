@@ -21,7 +21,7 @@ def test_legacy_postgres_scheme_and_sslmode_are_handled():
 
 def test_sqlite_url_untouched():
     url, args = normalize_database_url("sqlite+aiosqlite:///tmp/x.db")
-    assert url == "sqlite+aiosqlite:///tmp/x.db" and args == {}
+    assert url == "sqlite+aiosqlite:///tmp/x.db" and args == {"timeout": 30}  # waits for the single writer
 
 
 def test_csv_env_values_and_timeframes(monkeypatch):

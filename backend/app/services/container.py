@@ -5,6 +5,7 @@ Tests inject fake adapters and an SQLite session factory through the keyword ove
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from typing import Any
@@ -46,6 +47,13 @@ from app.services.assistant import chat_context, universe_names
 from app.services.chat import ChatService
 from app.services.control import AnalysisController
 from app.services.news import NewsService
+from app.services.onchain import OnChainService
+from app.services.events import EventsService
+from app.analysis.engine import STRATEGY
+from app.services.outcomes import OutcomeTracker
+from app.services.scalp import ScalpService
+from app.services.selection import ScanSelectionService
+from app.services.sentiment import SentimentService
 from app.services.portfolio import PortfolioService
 from app.services.watchlist import WatchlistService
 from app.services.assets import AssetService
@@ -92,6 +100,12 @@ class Container:
     news: NewsService
     chat: ChatService
     portfolio: PortfolioService
+    onchain: OnChainService
+    sentiment: SentimentService
+    selection: ScanSelectionService
+    events: EventsService
+    scalp: ScalpService
+    tracker: OutcomeTracker
     stream: BinanceStreamManager | None = None
     live_prices: LivePriceBook = field(default_factory=LivePriceBook)
     cmc: CoinMarketCapClient | None = None
@@ -100,6 +114,7 @@ class Container:
     async def warmup(self) -> None:
         """Startup checks that must never block or crash the app (e.g. CMC plan detection)."""
         await self.watchlist.load()
+        await self.selection.load()
         await self.portfolio.load()
         self.controller.start_background()
         if self.cmc is not None and self.cmc.has_key:
@@ -111,6 +126,7 @@ class Container:
                 log.info("CoinMarketCap access mode", extra={"mode": self.cmc.mode})
 
     async def aclose(self) -> None:
+        await self.scalp.stop()
         await self.controller.aclose()
         if self.stream is not None and self.stream.running:
             await self.stream.stop()
@@ -195,9 +211,14 @@ def build_container(
             breaker_factory=breaker,
         )
         cmc = CoinMarketCapAdapter(cmc_client)
-        gecko = CoinGeckoAdapter(CoinGeckoClient(settings.coingecko_base_url, http, health, retry=retry, breaker=breaker()))
+        gecko = CoinGeckoAdapter(
+            CoinGeckoClient(settings.coingecko_url, http, health, retry=retry, breaker=breaker(), headers=settings.coingecko_headers)
+        )
         paprika = CoinPaprikaAdapter(
-            CoinPaprikaClient(settings.coinpaprika_base_url, http, health, retry=retry, breaker=breaker())
+            CoinPaprikaClient(
+                settings.coinpaprika_base_url, http, health, retry=retry, breaker=breaker(),
+                timeout_seconds=settings.coinpaprika_timeout_seconds,
+            )
         )
         alternative = AlternativeMeAdapter(
             AlternativeMeClient(settings.alternative_me_base_url, http, health, retry=retry, breaker=breaker())
@@ -248,8 +269,10 @@ def build_container(
     analysis = AnalysisService(settings, universe, assets, regime, session_factory)
     live_prices = LivePriceBook()
     stream = BinanceStreamManager(settings.binance_ws_base_urls, live_prices.on_message)
+    selection = ScanSelectionService(session_factory)
+    analysis.scan_filter = selection.filter
     controller = AnalysisController(
-        analysis, universe, state, stream, live_prices, auto_minutes=settings.auto_analyze_minutes
+        analysis, universe, state, stream, live_prices, auto_minutes=settings.auto_analyze_minutes, selection=selection
     )
 
     news = NewsService(
@@ -259,10 +282,60 @@ def build_container(
         cache_seconds=settings.news_cache_seconds,
         asset_names=lambda: universe_names(universe),
         session_factory=session_factory,
+        trending_url=f"{settings.coingecko_url.rstrip('/')}/search/trending",
+        trending_headers=settings.coingecko_headers,
     )
     portfolio = PortfolioService(session_factory, router, universe, analysis, watchlist, live_prices=controller)
+
+    def listing_prices() -> dict[str, float]:
+        last = universe.last
+        return {a.symbol: a.listing.price_usd for a in last.assets} if last else {}
+
+    def sentiment_symbols() -> list[str]:
+        last = universe.last
+        return [a.symbol for a in last.assets if a.supported] if last else ["BTC", "ETH"]
+
+    onchain = OnChainService(settings, http, health, listing_prices, session_factory)
+    sentiment = SentimentService(settings, http, health, news, onchain, sentiment_symbols, session_factory)
+    def event_coins() -> list[tuple[str, str, float | None]]:
+        last = universe.last
+        if last is None:
+            return []
+        return [(a.symbol, a.name, a.listing.price_usd) for a in selection.filter(last.assets)]
+
+    events = EventsService(settings, http, health, event_coins)
+
+    async def before_scan() -> None:
+        jobs = [sentiment.digest(force=True)]
+        if settings.mobula_key:
+            jobs.append(events.unlocks())  # cached for EVENTS_CACHE_SECONDS; no refetch per scan
+        for result in await asyncio.gather(*jobs, return_exceptions=True):
+            if isinstance(result, Exception):
+                log.warning("pre-scan context refresh failed", extra={"error": str(result)})
+
+    tracker = OutcomeTracker(
+        session_factory,
+        cost_pct=lambda strategy: analysis.risk_params.round_trip_cost_pct if strategy == STRATEGY
+        else 2.0 * (analysis.risk_params.fee_pct + settings.scalp_slippage_pct),
+    )
+    analysis.on_candles = tracker.update
+    scalp = ScalpService(
+        settings, universe, assets, router,
+        risk_params=lambda: analysis.risk_params,
+        selection_filter=selection.filter,
+        notes_for=lambda symbol: [f"sentiment: {n}" for n in (getattr(sentiment.for_asset(symbol), "notes", None) or [])]
+        + events.notes_for(symbol),
+        equity=portfolio.equity_at_cost,
+        session_factory=session_factory,
+        on_candles=tracker.update,
+    )
+    analysis.sentiment_for = sentiment.for_asset
+    analysis.event_notes = events.notes_for
+    analysis.before_scan = before_scan
     chat = ChatService(
-        settings, http, lambda symbol: chat_context(analysis, controller, news, portfolio, watchlist, symbol)
+        settings,
+        http,
+        lambda symbol: chat_context(analysis, controller, news, portfolio, watchlist, symbol, sentiment, onchain, events),
     )
     return Container(
         settings=settings,
@@ -284,6 +357,12 @@ def build_container(
         news=news,
         chat=chat,
         portfolio=portfolio,
+        onchain=onchain,
+        sentiment=sentiment,
+        selection=selection,
+        events=events,
+        scalp=scalp,
+        tracker=tracker,
         stream=stream,
         live_prices=live_prices,
         cmc=cmc_client,

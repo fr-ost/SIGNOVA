@@ -3,8 +3,10 @@
 BLOCK (NO TRADE): the market cannot be traded safely at all (no order book, wide spread,
 thin depth, tiny volume).
 CAP (at most WATCH): the setup may be valid but not now (reward:risk too low, stop too
-wide, price extended or overbought, trend filter, bear market).
-DOWNGRADE (at most BUY): conditions required for STRONG BUY are missing.
+wide, price extended or overbought, trend filter, bear market, no 1H entry trigger yet,
+Bitcoin's 4H trend down for an altcoin).
+DOWNGRADE (at most BUY): conditions required for STRONG BUY are missing (including sellers
+dominating the order book).
 """
 
 from __future__ import annotations
@@ -46,6 +48,8 @@ class RiskInputs:
     trend_4h: TrendDirection | None
     plan: TradePlan | None
     market: MarketRegimeResult
+    h1: IndicatorSnapshot | None = None
+    is_btc: bool = False
 
 
 def _usd(value: float | None, rate: float | None) -> float | None:
@@ -122,6 +126,17 @@ def evaluate_risk(i: RiskInputs, p: RiskParams) -> list[RiskCheck]:
         f"{i.market.regime.value} market: signals limited to {cap.value}" if cap != SignalLabel.STRONG_BUY
         else "bull market: no regime limit",
     )
+    if not i.is_btc:
+        btc4 = i.market.btc_trend_4h
+        add(
+            "btc_4h",
+            "Bitcoin 4H trend",
+            btc4 != TrendDirection.DOWN,
+            RiskSeverity.CAP,
+            "Bitcoin 4H trend is down: altcoins rarely rise against it, wait for Bitcoin to stabilise"
+            if btc4 == TrendDirection.DOWN
+            else (f"Bitcoin 4H trend {btc4.value.lower()}" if btc4 is not None else "Bitcoin 4H trend unavailable"),
+        )
     percentile = i.h4.atr_pct_percentile if i.h4 else None
     add(
         "volatility",
@@ -143,6 +158,33 @@ def evaluate_risk(i: RiskInputs, p: RiskParams) -> list[RiskCheck]:
                 RiskSeverity.CAP,
                 f"price {distance:+.1f} ATR from the 4H EMA20 (limit +{p.max_extension_atr:g})",
             )
+    h1 = i.h1
+    confirmations: list[str] = []
+    if h1 is not None:
+        if h1.ema20 is not None and h1.close > h1.ema20:
+            confirmations.append("1H close above EMA20")
+        if h1.macd_hist is not None and h1.macd_hist_prev is not None and h1.macd_hist > h1.macd_hist_prev:
+            confirmations.append("1H MACD histogram rising")
+        if h1.rsi14 is not None and h1.rsi14_prev is not None and h1.rsi14 > h1.rsi14_prev:
+            confirmations.append("1H RSI rising")
+    add(
+        "entry_trigger",
+        "Entry trigger",
+        len(confirmations) >= p.min_trigger_confirmations,
+        RiskSeverity.CAP,
+        (f"1H momentum confirms the entry: {', '.join(confirmations)}" if len(confirmations) >= p.min_trigger_confirmations
+         else "no 1H entry trigger yet: wait until the 1H closes above its EMA20 with MACD or RSI turning up"
+         + (f" (only {', '.join(confirmations)})" if confirmations else "")),
+    )
+    if book is not None and book.valid and book.imbalance is not None:
+        add(
+            "book_pressure",
+            "Order book pressure",
+            book.imbalance > p.min_book_imbalance_strong,
+            RiskSeverity.DOWNGRADE,
+            f"order book imbalance {book.imbalance:+.2f} within +/-{book.band_pct:g}%"
+            + ("" if book.imbalance > p.min_book_imbalance_strong else ": sellers dominate, no STRONG BUY"),
+        )
     rsi4 = i.h4.rsi14 if i.h4 else None
     rsi1d = i.d1.rsi14 if i.d1 else None
     overbought = (rsi4 is not None and rsi4 > p.max_rsi_4h) or (rsi1d is not None and rsi1d > p.max_rsi_1d)

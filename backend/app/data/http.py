@@ -334,7 +334,9 @@ class ProviderHttpClient:
         *,
         params: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
+        timeout: float | None = None,
     ) -> Any:
+        extra: dict[str, Any] = {"timeout": httpx.Timeout(timeout, connect=10.0)} if timeout else {}
         if not self.breaker.allow():
             wait = self.breaker.remaining_open_seconds()
             raise ProviderUnavailable(self.provider, f"circuit open; retry in {wait:.0f}s")
@@ -345,7 +347,7 @@ class ProviderHttpClient:
             started = self._clock()
             error: ProviderError
             try:
-                response = await self._client.get(url, params=params, headers=headers)
+                response = await self._client.get(url, params=params, headers=headers, **extra)
             except httpx.TimeoutException as exc:
                 error = ProviderError(self.provider, f"timeout ({type(exc).__name__})", retryable=True)
             except httpx.TransportError as exc:

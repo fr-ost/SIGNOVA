@@ -1,4 +1,9 @@
-"""Raw CoinGecko public (keyless) client. Low rate limits, so calls are spaced out."""
+"""Raw CoinGecko client. Keyless public API, or a Demo / Pro key (COINGECKO_API_KEY).
+
+Demo keys (the free plan) use api.coingecko.com with the `x-cg-demo-api-key` header and allow
+about 30 calls per minute; Pro keys use pro-api.coingecko.com with `x-cg-pro-api-key`. The key
+is sent as a header, never in the URL, so it cannot leak into logs.
+"""
 
 from __future__ import annotations
 
@@ -20,11 +25,16 @@ class CoinGeckoClient:
         health: ProviderHealthRegistry,
         *,
         retry: RetryPolicy | None = None,
-        rate_per_second: float = 0.2,
+        rate_per_second: float | None = None,
+        headers: dict[str, str] | None = None,
         **http_kwargs: Any,
     ) -> None:
         health.register(PROVIDER, "listing_fallback")
         self._base = base_url.rstrip("/")
+        self._headers = dict(headers or {})
+        self.keyed = bool(self._headers)
+        if rate_per_second is None:
+            rate_per_second = 0.45 if self.keyed else 0.2  # Demo plan: 30/min; keyless: much lower
         self._http = ProviderHttpClient(
             PROVIDER, client, health, rate_per_second=rate_per_second, retry=retry, **http_kwargs
         )
@@ -40,7 +50,7 @@ class CoinGeckoClient:
         }
         if category:
             params["category"] = category
-        return await self._http.get_json(self._base + "/coins/markets", params=params)
+        return await self._http.get_json(self._base + "/coins/markets", params=params, headers=self._headers)
 
     async def global_data(self) -> Any:
-        return await self._http.get_json(self._base + "/global")
+        return await self._http.get_json(self._base + "/global", headers=self._headers)

@@ -15,10 +15,10 @@ Nothing in this project promises profitability or accuracy.
 | 2 | Historical data, indicators, structure, regime, quantitative signal and risk engine | **Done** |
 | 3 | On-demand controls, dashboard UI, charts, live updates | **Done** |
 | 4 | Portfolio, risk, allocation, DCA, P/L scenarios | **Done** |
-| 5 | News, sentiment, whale / on-chain | Partly: news headlines, keyword tone, CoinGecko trending |
+| 5 | News, sentiment, whale / on-chain | **Done** |
 | 6 | Alerts | Next |
 | 7 | OpenAI reasoning layer | Partly: AI chat assistant (read-only; cannot change signals) |
-| 8 | Signal tracking, backtesting, statistics | |
+| 8 | Signal tracking, backtesting, statistics | Partly: track record of every buy signal, per-coin backtests for scalp signals |
 | 9 | ML / statistical prediction | |
 
 ## Decision hierarchy
@@ -47,6 +47,17 @@ the final deterministic validation.
 | Candle-history cross-check | CoinMarketCap OHLCV (Startup plan or higher) | none (shown as not verified) |
 
 `OPENAI_API_KEY` is the only required credential. `CMC_API_KEY` is optional; see below.
+
+**CoinGecko key (optional):** set `COINGECKO_API_KEY` to your free Demo key
+(coingecko.com/en/developers/dashboard). It is sent as the `x-cg-demo-api-key` header to
+`https://api.coingecko.com/api/v3`, which raises the rate limit to about 30 calls a minute for the
+listing and market-cap fallback and for trending coins. For a paid key also set
+`COINGECKO_PLAN=pro` (uses `pro-api.coingecko.com` and `x-cg-pro-api-key`).
+
+**CoinPaprika** uses its free plan, `https://api.coinpaprika.com/v1`, with no key. Its `/tickers`
+answer lists every coin (several MB), so it gets `COINPAPRIKA_TIMEOUT_SECONDS` (30) instead of the
+default 10 seconds, which is what made it time out before. It is only called when CoinMarketCap
+and CoinGecko both fail.
 
 ## CoinMarketCap API key
 
@@ -128,8 +139,19 @@ consistency 25% and provider health 15%. It is informational; the gate decision 
 
 Spot long only. The engine is deterministic: the same candles always give the same signal, and
 every point of the score and every limit is explained in the API and on the dashboard. The score
-ranks setups; it is **not a probability**, and there is no measured track record until signal
-tracking and backtesting arrive in Phase 8.
+ranks setups; it is **not a probability**. How the signals actually performed is measured in the
+Track record (below).
+
+**Engine audit (quant-2.1.0):** the indicator maths was re-verified (Wilder RSI/ATR/ADX, EMA,
+MACD, Bollinger, OBV against reference values; swing points only once confirmed, no repainting).
+The weak spots were in the rules, and three checks were added:
+
+* **Entry trigger** (cap at WATCH): at least 2 of 3 on 1H (close above EMA20, MACD histogram
+  rising, RSI rising). A pullback is no longer bought while 1H momentum is still falling.
+* **Bitcoin 4H trend** (cap at WATCH, altcoins only): when Bitcoin's 4H trend is down, altcoin
+  buys wait. Altcoins rarely rise against a falling Bitcoin.
+* **Order book pressure** (no STRONG BUY): sellers stacked in the book (imbalance -0.25 or lower
+  within 1%) prevent a STRONG BUY.
 
 **Strategy:** multi-timeframe trend following with pullback entries. 1D sets the primary trend,
 4H is the setup timeframe, 1H confirms momentum, 15m times the entry.
@@ -178,8 +200,8 @@ reason (for example "wait for a breakout above X" or "extended: wait for a pullb
 | Effect | Checks |
 |---|---|
 | Block (`NO TRADE`) | order book missing or invalid, spread above 30 bps, less than $25,000 depth within 1% on either side, 24h volume below $5M |
-| Cap (at most `WATCH`) | 1D or 4H trend down, net reward:risk below 1.5R, nearest resistance closer than 0.75R, stop wider than 15%, price more than 2.5 ATR above the 4H EMA20, RSI above 78 (4H) or 80 (1D), 24h move above +25%, bear or unknown market regime |
-| Downgrade (at most `BUY`) | 1D and 4H not both up, net reward:risk below 2R, resistance closer than 1R, 15m RSI above 85, 4H volatility at the 95th percentile, neutral market regime |
+| Cap (at most `WATCH`) | 1D or 4H trend down, net reward:risk below 1.5R, nearest resistance closer than 0.75R, stop wider than 15%, price more than 2.5 ATR above the 4H EMA20, RSI above 78 (4H) or 80 (1D), 24h move above +25%, bear or unknown market regime, no 1H entry trigger, Bitcoin 4H trend down (altcoins) |
+| Downgrade (at most `BUY`) | 1D and 4H not both up, net reward:risk below 2R, resistance closer than 1R, 15m RSI above 85, 4H volatility at the 95th percentile, neutral market regime, sellers dominating the order book |
 
 **Market regime:** Bitcoin's daily trend (EMA50/EMA200 and slope) plus breadth, the share of the
 universe trading above its daily EMA50. `BULL` allows every label, `NEUTRAL` at most `BUY`, `BEAR`
@@ -202,6 +224,69 @@ in parallel (about 350 Binance request weight of the 6,000 per-minute limit). Co
 cross-checks stay cached per asset (30 minutes for 1H, 6 hours for 1D) under the credit pacing
 described above.
 
+## Scalp signals (15m / 1h / 4h)
+
+The Scalp signals card finds short-term spot longs for a horizon you pick, on the coins in
+"Coins to analyse". Press **Find scalps**; nothing runs in the background.
+
+| Horizon | Setup candles | Trend must be up | Must not be down | Time limit |
+|---|---|---|---|---|
+| 15 min | 5m | 15m | 1H | 30 minutes |
+| 1 hour | 15m | 1H | 4H | 2 hours |
+| 4 hours | 1H | 4H | 1D | 8 hours |
+
+**Setups** (long only): a *pullback* (uptrend, dip to the EMA20, RSI resets to 52 or lower, then
+a bullish candle closes above the previous high) or a *breakout* (close above the 20-candle
+high on 1.8x average volume after a quiet period, not overbought). Both also need Bitcoin's trend
+not down (for altcoins), the price above today's VWAP (15 min and 1 hour), room to the next swing
+high, and a stop at least 2.5x the round-trip costs away. With 0.1% fees a 15-minute scalp on
+Bitcoin rarely has enough room: the engine says "move too small for fees" instead of pretending.
+
+**Plan:** entry at the signal candle's close (buy zone up to 0.25R above), stop under the recent
+low (0.8 to 2 ATR), TP1 at 1R (or just under a closer swing high) for half, stop to break-even,
+TP2 at 2R, and a time exit. Size risks 1% of the portfolio (your risk settings).
+
+**Backtest evidence gate:** before a coin gets a label, the *same rules* are replayed over its
+recent history (4,000 setup candles: about 14 days for 15 min, 41 days for 1 hour, 166 days for 4
+hours), one trade at a time, entries at the signal close, stop counted first when a candle hits
+both, net of fees and slippage. The result decides the label:
+
+* `STRONG BUY`: at least 25 trades, expectancy +0.25R or better, profit factor 1.5+, win rate 50%+.
+* `BUY`: at least 15 trades, expectancy +0.1R or better and profit factor 1.2+; or, for a coin with
+  too few trades, the same rules across all scanned coins (40+ trades) pass (capped at `BUY`).
+* `NO TRADE`: the rules lost money on this coin (or across the coins).
+* `WATCH`: not enough evidence, the setup type alone lost, the price already ran more than 0.25R
+  above the entry, or the trend is right but no trigger yet.
+
+Live checks the history cannot contain still apply: spread, depth, 24h volume, order-book
+pressure, price versus the stop and TP1, and the entry window (2 candles). A test verifies the
+engine never uses future data: every setup found in the full history is identical when the history
+ends at that candle.
+
+`POST /api/scalp/scan?horizon=1h` (token), `GET /api/scalp?horizon=1h`, `GET /api/scalp/{symbol}?horizon=4h` (token).
+
+## Track record
+
+Every BUY and STRONG BUY (swing and scalp) is followed on the candles after it with the same
+pessimistic simulator as the backtest: stop first, half at TP1 then break-even, targets, and a
+time limit (14 days for swing signals). A signal that appears while an earlier one on the same
+coin and strategy is still running is marked SKIPPED, so one move is never counted twice. It
+uses candles the analysis already fetched, so it costs no extra API calls. The card shows win
+rate, average R, total R and profit factor per strategy for the last 90 days
+(`GET /api/performance?days=90`). This is the honest measure of accuracy: unlike a backtest,
+nothing in it was known when the rules were written.
+
+## About accuracy and "$50 a day"
+
+No indicator set can promise a win rate, and nothing here does. What this dashboard does is
+refuse trades whose own history says they lose, show the measured record of every setup, and size
+every trade so a stop costs about 1% of the portfolio. Some arithmetic for a daily target: with a
+measured expectancy of +0.2R and 1% risk per trade, each trade earns on average 0.2% of the
+portfolio; $50 a day then needs about $25,000 per trade-a-day (for example $5,000 and five good
+trades every day), and results vary a lot from day to day. Raising risk per trade to reach a
+target faster is the usual way accounts are lost. Start with small sizes, watch the Track record
+for a few weeks, and trust only what it shows.
+
 ## Manual control (Phase 3)
 
 Nothing analyses in the background by default, so no provider calls or CoinMarketCap credits
@@ -216,6 +301,12 @@ are spent while you are not using the dashboard.
 * **Refresh data** reloads market data once; the **Auto-refresh** checkbox (off by default)
   reloads it every 30 seconds.
 * `GET /api/signals` only returns the latest completed scan; it never starts one.
+* **Coins to analyse** (under the control bar): pick exactly which coins a scan covers, for
+  example just five (Top 5 / Top 10 / Select all / Clear, or click coins), then Save selection.
+  Analyze now, Auto-analyze and live prices then use only those coins, which saves provider
+  calls. The market table still lists every coin (unselected ones are dimmed). Coins you add
+  to the watchlist join the selection. Stored in `app_settings` (migration 0003);
+  `GET/PUT /api/control/selection`.
 
 **Watchlist:** add any coin by symbol. It joins the next scan (marked "watchlist") with the full
 pipeline. It is priced from the 200-coin listing (still one CoinMarketCap credit), or from
@@ -243,19 +334,90 @@ as a share of equity, and P/L after costs for "stop hit", "TP1 then stop at entr
 
 **AI assistant** (homepage, `POST /api/chat`): chat with an OpenAI model about the next trade.
 Each question carries the dashboard's own data as context: the latest scan and market regime,
-news headlines, your portfolio and risk settings and, if you pick a coin (or press "Ask AI about
+news headlines, market mood and on-chain data, your portfolio and risk settings and, if you pick a coin (or press "Ask AI about
 this coin"), its full analysis. The system prompt makes the engine authoritative: the assistant
 explains and discusses but cannot turn a NO TRADE or WATCH into a buy. Models:
 `OPENAI_ANALYSIS_MODEL` (default `gpt-5-mini`), falling back to `OPENAI_FALLBACK_MODEL`
 (default `gpt-4o-mini`) if the first is unavailable. Rate limited to
 `CHAT_RATE_LIMIT_PER_MINUTE` (10).
 
-**News** (`GET /api/news`, cached 15 minutes, fetched only when the page opens or you refresh):
+**Model picker:** the chat card has a model list (`CHAT_MODEL_OPTIONS`; models your key cannot
+use are greyed out, checked with OpenAI's model list) and a reasoning-effort setting for GPT-5
+and o-series models. Your choice is remembered in the browser. The reply shows which model
+answered.
+
+*Fix for "The model returned no text":* GPT-5 models reason before they answer, and the
+reasoning counts against the output limit. The old limit (1500 tokens) was often used up by
+reasoning alone, leaving an empty answer. Reasoning models now get
+`CHAT_REASONING_BUDGET_TOKENS` (6000) on top of `CHAT_MAX_OUTPUT_TOKENS` and
+`CHAT_REASONING_EFFORT=low` by default; if a model still returns nothing, the next model
+answers instead and the reply says so.
+
+**News** (`GET /api/news`, cached 15 minutes, fetched only when you press Load/Refresh, or on page
+open if you tick "Load when the page opens"; nothing runs in the background, and sentiment and
+the chat only read headlines already loaded):
 RSS from CoinDesk, Cointelegraph, Decrypt and Bitcoin Magazine, CryptoCompare's free news API
 and CoinGecko trending coins, with no keys needed. Headlines are de-duplicated, tagged with the
 coins they mention, given a keyword-based tone (labelled as such) and stored in the `news` table.
 A source that fails is listed, never guessed. News is context for you and the assistant; it is
 not an input to the signal engine.
+
+## Sentiment and on-chain (Phase 5)
+
+**Market mood** (`GET /api/sentiment`, cached 10 minutes): three transparent components, each
+scaled from -1 (fear) to +1 (greed) and combined with fixed weights:
+
+| Component | Source | Weight |
+|---|---|---|
+| Fear & Greed now vs 50, with 7-day and 30-day averages and the 7-day trend | alternative.me | 0.5 |
+| News tone of the last 48 hours (keyword method) | the news sources above | 0.3 |
+| Average perpetual funding vs the 0.01%/8h baseline | Binance futures `premiumIndex` (public) | 0.2 |
+
+The score maps to EXTREME FEAR, FEAR, NEUTRAL, GREED or EXTREME GREED. Stablecoin supply
+change (DefiLlama) is shown alongside as a liquidity indicator but not weighted.
+
+**Per coin**: headline tone, perpetual funding rate and labelled exchange flows. Notes are
+raised for crowded longs (funding >= 0.05% per 8h), crowded shorts (<= -0.03%), mostly
+negative headlines and large labelled exchange inflows. These notes join the signal's
+"Risks to keep in mind" as `sentiment: ...`. **Sentiment never changes a label or a score**;
+there is no measured evidence yet that it improves them (that is Phase 8's job).
+
+**On-chain** (`GET /api/onchain`, cached 10 minutes), all free and keyless:
+
+| Data | Source |
+|---|---|
+| BTC fees, mempool size, hashrate, next difficulty adjustment | mempool.space |
+| Large BTC transactions (>= `WHALE_MIN_BTC`, default 100 BTC) | blockchain.com unconfirmed transactions |
+| ETH gas, network utilisation, large ETH transfers (>= `WHALE_MIN_ETH`, default 1000 ETH) | Blockscout, whose public address names identify many exchange wallets |
+| USD stablecoin supply and its 1d / 7d / 30d change | DefiLlama |
+| Optional: labelled whale transfers on every major chain | Whale Alert (`WHALE_ALERT_API_KEY`) |
+
+A transfer is only called an exchange inflow or outflow when a source labels one side as an
+exchange; everything else is "unlabelled". Large transfers are stored in `whale_events`,
+sentiment readings in `sentiment`. Pressing Analyze now refreshes sentiment first (at most
+once a minute), so each scan carries current notes. Forced refreshes within
+`MIN_REFRESH_SECONDS` (60) of the last fetch are served from the cache to protect the free
+sources.
+
+## Token unlocks and airdrops
+
+`GET /api/events/unlocks` and `GET /api/events/airdrops`, shown in the "Token unlocks &
+airdrops" card (loaded when you press Load, cached `EVENTS_CACHE_SECONDS`, 6 hours).
+
+* **Token unlocks** (Mobula, `MOBULA_API_KEY`; free key at mobula.io): each analysed coin's
+  release schedule, with the next unlock date, tokens, USD value, share of circulating supply
+  and who receives them. Unlocks of `UNLOCK_NOTE_MIN_PCT` (1%) of circulating supply or more
+  within `UNLOCK_NOTE_DAYS` (14) are added to that coin's signal risks ("token unlock in N
+  days..."). Like sentiment, this never changes a label or score. With a key, each scan
+  refreshes unlocks at most once per cache period.
+* **Airdrops** (AlphaDrops Developer API, `ALPHADROPS_API_KEY`, a paid subscription): active,
+  claimable and upcoming airdrops with chains, estimated reward and end date. They are
+  unverified third-party listings.
+* **Tokenomist** has no free API, so it is not integrated.
+
+Without a key, the card says which variable to set. The Mobula and AlphaDrops response formats
+were implemented from their published docs and read defensively; check the card once after
+adding a key.
 
 ## Security
 
@@ -283,7 +445,17 @@ Without `ADMIN_TOKEN`, anyone who finds the URL can use those controls.
 | `GET /api/live` | Latest streamed prices (no provider calls) |
 | `GET/POST /api/watchlist`, `DELETE /api/watchlist/{symbol}` | Watchlist (changes need the token) |
 | `GET /api/news?refresh=true` | Headlines, tone, trending coins from free sources |
-| `POST /api/chat` | AI assistant (token) |
+| `GET /api/sentiment?refresh=true` | Phase 5: market mood, components, per-coin sentiment and notes |
+| `GET /api/onchain?refresh=true` | Phase 5: BTC/ETH network state, stablecoin supply, large transfers, exchange flows |
+| `GET /api/control/selection`, `PUT` (token) | Coins a scan analyses: all, or your selection |
+| `GET /api/events/unlocks?refresh=true` | Upcoming token unlocks for the analysed coins (Mobula key) |
+| `GET /api/events/airdrops?refresh=true` | Airdrops (AlphaDrops key) |
+| `GET /api/chat/models` | Chat model choices and which ones your OpenAI key can use (token) |
+| `POST /api/scalp/scan?horizon=15m\|1h\|4h` (token) | Scalp scan of the selected coins, in the background |
+| `GET /api/scalp?horizon=1h` | Latest scalp scan (signals, per-coin backtest, pooled record) and scan status |
+| `GET /api/scalp/{symbol}?horizon=1h` (token) | Scalp analysis of one coin now |
+| `GET /api/performance?days=90` | Track record per strategy and the latest outcomes |
+| `POST /api/chat` | AI assistant (token); optional `model` and `reasoning_effort` |
 | `GET /api/portfolio`, `PUT /cash`, `POST/DELETE /positions`, `PUT /risk`, `POST /plan` | Portfolio, risk settings, trade plan (token) |
 | `GET /api/assets/{symbol}/analysis` | Phase 2: indicators, structure, regimes, score factors, trade plan, risk checks, full pipeline |
 | `GET /api/market/regime` | Phase 2: market regime and the signal cap it applies |
@@ -351,6 +523,16 @@ Portfolio > Risk settings, which are stored in the database and take precedence.
 | `AUTO_ANALYZE_MINUTES` | 0 | scan schedule at startup (0 = manual only) |
 | `OPENAI_ANALYSIS_MODEL` / `OPENAI_FALLBACK_MODEL` | gpt-5-mini / gpt-4o-mini | chat models |
 | `NEWS_CACHE_SECONDS` / `NEWS_FEEDS` | 900 / four RSS feeds | news cadence and sources |
+| `SENTIMENT_CACHE_SECONDS` / `ONCHAIN_CACHE_SECONDS` | 600 / 600 | Phase 5 cadence |
+| `WHALE_MIN_BTC` / `WHALE_MIN_ETH` | 100 / 1000 | smallest transfer listed as a whale |
+| `WHALE_ALERT_API_KEY` / `WHALE_ALERT_MIN_USD` | unset / 1000000 | optional Whale Alert source |
+| `COINGECKO_API_KEY` / `COINGECKO_PLAN` | unset / demo | CoinGecko Demo (free) or Pro key |
+| `COINPAPRIKA_TIMEOUT_SECONDS` | 30 | timeout for the large CoinPaprika free-plan download |
+| `CHAT_REASONING_EFFORT` / `CHAT_REASONING_BUDGET_TOKENS` | low / 6000 | GPT-5 / o-series reasoning |
+| `CHAT_MODEL_OPTIONS` | gpt-5-mini, gpt-5, gpt-5-nano, gpt-4.1, gpt-4.1-mini, gpt-4o, gpt-4o-mini, o4-mini | models in the chat picker |
+| `MOBULA_API_KEY` / `ALPHADROPS_API_KEY` | unset | token unlocks / airdrops |
+| `EVENTS_CACHE_SECONDS` / `UNLOCK_WINDOW_DAYS` | 21600 / 30 | unlock and airdrop cadence, unlock window |
+| `SCALP_SLIPPAGE_PCT` / `SCALP_MIN_RISK_COST_MULTIPLE` / `SCALP_MIN_TRADES` | 0.02 / 2.5 / 15 | scalp costs, fee filter, evidence minimum |
 | `REGIME_CACHE_SECONDS` | 600 | market regime refresh |
 | `CANDLE_FETCH_LIMIT` / `CANDLE_FETCH_LIMIT_LONG` | 500 / 1000 | candles per request (5m-1H / 4H-1D) |
 | `SIGNAL_PERSIST_ENABLED` / `FEATURE_PERSIST_TIMEFRAMES` | true / 1h,4h,1d | history storage |
@@ -392,6 +574,9 @@ deterministic synthetic markets sampled into consistent 5m-1D candles (strong up
 parabolic move, failed integrity gate, wide spread, bear and neutral regimes, missing history,
 unsupported asset, STRONG BUY downgrades), trade-plan math net of costs, sizing, final validation,
 and the Phase 2 endpoints with persistence and de-duplication (SQLite and PostgreSQL).
+Phase 3-5: manual control, watchlist, news parsing, chat, portfolio, and the on-chain and
+sentiment parsers, scores, notes, endpoints, refresh guard and persistence, with every free
+source mocked. Sentiment notes are checked to leave labels and scores unchanged.
 Fake adapters and synthetic markets exist only in `backend/tests`; production code never
 generates data.
 
@@ -426,4 +611,8 @@ Dockerfile, railway.json, .env.example
 
 Phase 3/4 services: `control.py` (manual scans, schedule, live prices), `watchlist.py`,
 `news.py`, `chat.py` and `assistant.py` (OpenAI chat and its context), `portfolio.py`;
+Phase 5: `onchain.py` (network data, whales, stablecoins), `sentiment.py` (market mood),
+`events.py` (token unlocks, airdrops), `selection.py` (coins to analyse);
+Phase 6: `analysis/scalp.py` (scalp rules and backtest), `analysis/trade_sim.py` (shared trade
+simulator), `services/scalp.py`, `services/outcomes.py` (track record);
 routes in `api/controls.py`.

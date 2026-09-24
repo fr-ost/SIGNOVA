@@ -33,6 +33,7 @@ log = logging.getLogger(__name__)
 
 MAX_BYTES = 3_000_000
 MAX_ITEMS = 60
+MIN_REFRESH_SECONDS = 60
 COINGECKO_TRENDING = "https://api.coingecko.com/api/v3/search/trending"
 
 POSITIVE = {
@@ -213,7 +214,9 @@ class NewsService:
         asset_names: Callable[[], dict[str, str]] | None = None,
         session_factory: async_sessionmaker[AsyncSession] | None = None,
         trending_url: str | None = COINGECKO_TRENDING,
+        trending_headers: dict[str, str] | None = None,
     ) -> None:
+        self._trending_headers = dict(trending_headers or {})
         self._http = http
         self._feeds = list(feeds)
         self._cc = cryptocompare_url
@@ -228,13 +231,14 @@ class NewsService:
         return entry[0] if entry else None
 
     async def digest(self, *, force: bool = False) -> NewsDigest:
+        entry = self._cache.peek("news")
+        if force and entry is not None and entry[1] < MIN_REFRESH_SECONDS:
+            force = False  # protect the free sources from rapid refreshes
         return await self._cache.get_or_load("news", self._load, self._ttl, force=force)
 
-    async def _get(self, url: str) -> httpx.Response:
-        response = await self._http.get(
-            url, timeout=12.0, headers={"Accept": "application/rss+xml, application/xml, application/json, */*"},
-            follow_redirects=True,
-        )
+    async def _get(self, url: str, extra_headers: dict[str, str] | None = None) -> httpx.Response:
+        headers = {"Accept": "application/rss+xml, application/xml, application/json, */*", **(extra_headers or {})}
+        response = await self._http.get(url, timeout=12.0, headers=headers, follow_redirects=True)
         response.raise_for_status()
         if len(response.content) > MAX_BYTES:
             raise ValueError("response too large")
@@ -250,7 +254,7 @@ class NewsService:
         if self._cc:
             jobs["cryptocompare"] = self._get(self._cc)
         if self._trending:
-            jobs["coingecko trending"] = self._get(self._trending)
+            jobs["coingecko trending"] = self._get(self._trending, self._trending_headers)
         results = await asyncio.gather(*jobs.values(), return_exceptions=True)
         items: list[NewsEntry] = []
         trending: list[TrendingCoin] = []

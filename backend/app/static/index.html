@@ -10,8 +10,25 @@
   <script src="/static/dashboard.js?v=__VERSION__" defer></script>
 </head>
 <body>
+  <svg class="sprite" aria-hidden="true" focusable="false">
+    <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></symbol>
+    <symbol id="i-signal" viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></symbol>
+    <symbol id="i-wallet" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h13v4"/><rect x="3" y="7" width="18" height="13" rx="2"/><circle cx="16.5" cy="13.5" r="1.3"/></symbol>
+    <symbol id="i-bars" viewBox="0 0 24 24"><path d="M4 20V11M10 20V5M16 20v-7M21 20H3"/></symbol>
+    <symbol id="i-server" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/></symbol>
+    <symbol id="i-chat" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H8l-5 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><path d="M8 9h8M8 13h5"/></symbol>
+    <symbol id="i-star" viewBox="0 0 24 24"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1 6.2L12 17.3 6.5 20.2l1-6.2L3 9.6l6.2-.9z"/></symbol>
+    <symbol id="i-gauge" viewBox="0 0 24 24"><path d="M3.5 18a10 10 0 1 1 17 0"/><path d="m12 14 4.5-4.5"/><circle cx="12" cy="14" r="1.2"/></symbol>
+    <symbol id="i-calendar" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M8 3v4M16 3v4M3 10h18M8 14h3M8 17h6"/></symbol>
+    <symbol id="i-news" viewBox="0 0 24 24"><path d="M4 5h13v14a2 2 0 0 0 2 2H6a2 2 0 0 1-2-2z"/><path d="M17 9h3v10a2 2 0 0 1-2 2M8 9h5M8 13h5M8 17h3"/></symbol>
+    <symbol id="i-target" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.2"/></symbol>
+    <symbol id="i-zap" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m12.5 6-4 7h4l-1 5 4-7h-4z"/></symbol>
+    <symbol id="i-trophy" viewBox="0 0 24 24"><path d="M8 4h8v5a4 4 0 0 1-8 0z"/><path d="M8 6H5a3 3 0 0 0 3 4M16 6h3a3 3 0 0 1-3 4M12 13v4M8 20h8M9 20l1-3h4l1 3"/></symbol>
+    <symbol id="i-logo" viewBox="0 0 24 24"><path d="M3 17 9 11l4 4 8-8"/><path d="M15 7h6v6"/></symbol>
+  </svg>
   <header class="topbar">
     <div class="brand">
+      <span class="logo" aria-hidden="true"><svg><use href="#i-logo"/></svg></span>
       <h1>Crypto Market Analysis</h1>
       <span class="muted small">v__VERSION__</span>
     </div>
@@ -33,7 +50,7 @@
       execution: you decide and place every trade yourself. Nothing here is financial advice.
     </p>
 
-    <section class="card controls" aria-label="Analysis controls">
+    <section class="card controls" data-feature="control" aria-label="Analysis controls">
       <div class="control-row">
         <button id="analyze" type="button" class="primary">Analyze now</button>
         <button id="stop" type="button" class="danger">Stop</button>
@@ -51,6 +68,26 @@
         <span class="spacer"></span>
         <button id="unlock" type="button" class="ghost small" hidden>Enter admin token</button>
       </div>
+      <details id="selection-box" class="selection">
+        <summary>
+          <svg class="feat-icon" aria-hidden="true"><use href="#i-target"/></svg><span>Coins to analyse</span>
+          <span id="selection-summary" class="pill">All coins</span>
+        </summary>
+        <div class="selection-body">
+          <div class="control-row">
+            <button id="sel-all" type="button" class="ghost small">Select all</button>
+            <button id="sel-none" type="button" class="ghost small">Clear</button>
+            <button id="sel-top5" type="button" class="ghost small">Top 5</button>
+            <button id="sel-top10" type="button" class="ghost small">Top 10</button>
+            <span id="selection-count" class="muted small"></span>
+            <span class="spacer"></span>
+            <button id="sel-save" type="button" class="primary small">Save selection</button>
+          </div>
+          <div id="selection-chips" class="select-chips" role="group" aria-label="Coins to analyse"></div>
+          <p class="muted small">Analyze now, auto-analyze and live prices use only the selected coins (fewer API calls).
+            The market table still shows every coin. Coins you add to the watchlist join the selection.</p>
+        </div>
+      </details>
       <div class="progress" aria-hidden="true"><span id="scan-progress"></span></div>
     </section>
 
@@ -64,9 +101,9 @@
 
     <div id="state-reasons" class="alert warn" hidden></div>
 
-    <section class="card" aria-labelledby="signals-title">
+    <section class="card" data-feature="signals" aria-labelledby="signals-title">
       <div class="card-head">
-        <h2 id="signals-title">Signals</h2>
+        <h2 id="signals-title"><svg class="feat-icon" aria-hidden="true"><use href="#i-signal"/></svg>Signals</h2>
         <span id="signals-meta" class="muted small"></span>
       </div>
       <div id="signal-counts" class="chips" aria-label="Signals per label"></div>
@@ -100,9 +137,62 @@
       </div>
     </section>
 
-    <section class="card" aria-labelledby="portfolio-title">
+    <section class="card" data-feature="scalp" aria-labelledby="scalp-title">
       <div class="card-head">
-        <h2 id="portfolio-title">Portfolio</h2>
+        <h2 id="scalp-title"><svg class="feat-icon" aria-hidden="true"><use href="#i-zap"/></svg>Scalp signals</h2>
+        <span id="scalp-meta" class="muted small"></span>
+      </div>
+      <div class="control-row pad-row">
+        <div class="segmented" role="radiogroup" aria-label="Trade horizon">
+          <button type="button" role="radio" data-horizon="15m" aria-checked="false">15 min</button>
+          <button type="button" role="radio" data-horizon="1h" aria-checked="true">1 hour</button>
+          <button type="button" role="radio" data-horizon="4h" aria-checked="false">4 hours</button>
+        </div>
+        <button id="scalp-scan" type="button" class="primary">Find scalps</button>
+        <span id="scalp-status" class="muted small" aria-live="polite"></span>
+      </div>
+      <div class="progress inset" aria-hidden="true"><span id="scalp-progress"></span></div>
+      <p id="scalp-pooled" class="muted small pad" hidden></p>
+      <div id="scalp-error" class="alert inset" role="alert" hidden></div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Coin</th>
+              <th>Signal</th>
+              <th class="hide-sm">Setup</th>
+              <th class="num">Entry</th>
+              <th class="num">Stop</th>
+              <th class="num">TP1 / TP2</th>
+              <th class="num">Backtest</th>
+              <th class="hide-sm">Why</th>
+            </tr>
+          </thead>
+          <tbody id="scalp-rows">
+            <tr><td colspan="8" class="empty">Pick a horizon and press “Find scalps”. Each coin's setup is backtested on its own recent history first.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="card-foot small muted">
+        Spot longs only. Entry at the signal candle's close; half the position at TP1, then the stop moves to the entry;
+        the rest at TP2 or at the time limit. Backtest numbers are net of fees and slippage and use only past data, but past
+        results do not guarantee future ones. A setup that lost money in the backtest is never shown as a buy.
+      </div>
+    </section>
+
+    <section class="card" data-feature="record" aria-labelledby="record-title">
+      <div class="card-head">
+        <h2 id="record-title"><svg class="feat-icon" aria-hidden="true"><use href="#i-trophy"/></svg>Track record</h2>
+        <button id="record-refresh" type="button" class="small">Refresh</button>
+      </div>
+      <p class="muted small pad">What happened after each buy signal, measured on later candles (stop, targets, break-even
+        after TP1, time limit; net of costs). This is the real accuracy of the signals, not a backtest.</p>
+      <div id="record-body"><p class="muted small pad">Loading…</p></div>
+    </section>
+
+    <section class="card" data-feature="portfolio" aria-labelledby="portfolio-title">
+      <div class="card-head">
+        <h2 id="portfolio-title"><svg class="feat-icon" aria-hidden="true"><use href="#i-wallet"/></svg>Portfolio</h2>
         <span id="portfolio-meta" class="muted small"></span>
       </div>
       <div id="portfolio-error" class="alert inset" role="alert" hidden></div>
@@ -143,9 +233,9 @@
       </div>
     </section>
 
-    <section class="card" aria-labelledby="market-title">
+    <section class="card" data-feature="market" aria-labelledby="market-title">
       <div class="card-head">
-        <h2 id="market-title">Top 20 + watchlist</h2>
+        <h2 id="market-title"><svg class="feat-icon" aria-hidden="true"><use href="#i-bars"/></svg>Top 20 + watchlist</h2>
         <span id="universe-meta" class="muted small"></span>
       </div>
       <div class="table-wrap">
@@ -178,9 +268,9 @@
       </div>
     </section>
 
-    <section class="card" aria-labelledby="providers-title">
+    <section class="card" data-feature="providers" aria-labelledby="providers-title">
       <div class="card-head">
-        <h2 id="providers-title">Provider health</h2>
+        <h2 id="providers-title"><svg class="feat-icon" aria-hidden="true"><use href="#i-server"/></svg>Provider health</h2>
         <span id="stream-meta" class="muted small"></span>
       </div>
       <div class="table-wrap">
@@ -209,9 +299,9 @@
     </div>
 
     <aside class="side-col">
-      <section class="card chat" aria-labelledby="chat-title">
+      <section class="card chat" data-feature="chat" aria-labelledby="chat-title">
         <div class="card-head">
-          <h2 id="chat-title">AI assistant</h2>
+          <h2 id="chat-title"><svg class="feat-icon" aria-hidden="true"><use href="#i-chat"/></svg>AI assistant</h2>
           <button id="chat-clear" type="button" class="ghost small">Clear</button>
         </div>
         <div id="chat-log" class="chat-log" aria-live="polite">
@@ -219,15 +309,25 @@
             sees the dashboard's data; its answers never change a signal.</p>
         </div>
         <form id="chat-form" class="chat-form">
-          <select id="chat-symbol" aria-label="Coin to focus on"><option value="">All coins</option></select>
+          <div class="chat-options">
+            <select id="chat-symbol" aria-label="Coin to focus on"><option value="">All coins</option></select>
+            <select id="chat-model" aria-label="OpenAI model"><option value="">Default model</option></select>
+            <select id="chat-effort" aria-label="Reasoning effort" title="Reasoning effort (GPT-5 and o-series models)">
+              <option value="">Reasoning: auto</option>
+              <option value="minimal">Reasoning: minimal</option>
+              <option value="low">Reasoning: low</option>
+              <option value="medium">Reasoning: medium</option>
+              <option value="high">Reasoning: high</option>
+            </select>
+          </div>
           <textarea id="chat-input" rows="2" maxlength="4000" placeholder="e.g. Which setup has the best risk:reward right now?" required></textarea>
           <button type="submit" class="primary">Send</button>
         </form>
       </section>
 
-      <section class="card" aria-labelledby="watch-title">
+      <section class="card" data-feature="watch" aria-labelledby="watch-title">
         <div class="card-head">
-          <h2 id="watch-title">Watchlist</h2>
+          <h2 id="watch-title"><svg class="feat-icon" aria-hidden="true"><use href="#i-star"/></svg>Watchlist</h2>
           <span class="muted small">analysed with the Top 20</span>
         </div>
         <form id="watch-form" class="inline-form">
@@ -237,14 +337,48 @@
         <div id="watch-items" class="chips"></div>
       </section>
 
-      <section class="card" aria-labelledby="news-title">
+      <section class="card" data-feature="mood" aria-labelledby="mood-title">
         <div class="card-head">
-          <h2 id="news-title">Latest crypto news</h2>
-          <button id="news-refresh" type="button" class="ghost small">Refresh</button>
+          <h2 id="mood-title"><svg class="feat-icon" aria-hidden="true"><use href="#i-gauge"/></svg>Market mood &amp; on-chain</h2>
+          <button id="mood-refresh" type="button" class="small">Load</button>
+        </div>
+        <div id="mood-summary"><p class="muted small">Loaded only when you ask: press Load (about 10 free public calls, cached 10 minutes).</p></div>
+        <div id="onchain-summary"></div>
+        <details id="whales-box" class="whales">
+          <summary class="small">Large transfers <span id="whale-count" class="muted"></span></summary>
+          <ul id="whale-list" class="news-list"></ul>
+        </details>
+        <div id="mood-meta" class="chips small muted"></div>
+        <label class="toggle small card-pref"><input id="mood-auto" type="checkbox"> Load when the page opens</label>
+      </section>
+
+      <section class="card" data-feature="events" aria-labelledby="events-title">
+        <div class="card-head">
+          <h2 id="events-title"><svg class="feat-icon" aria-hidden="true"><use href="#i-calendar"/></svg>Token unlocks &amp; airdrops</h2>
+          <button id="events-refresh" type="button" class="small">Load</button>
+        </div>
+        <div class="tabs" role="tablist" aria-label="Events">
+          <button id="tab-unlocks" type="button" role="tab" aria-selected="true" aria-controls="unlocks-panel">Unlocks</button>
+          <button id="tab-airdrops" type="button" role="tab" aria-selected="false" aria-controls="airdrops-panel">Airdrops</button>
+        </div>
+        <div id="unlocks-panel" role="tabpanel" aria-labelledby="tab-unlocks">
+          <p class="muted small pad">Upcoming token unlocks for the coins you analyse (Mobula). Press Load.</p>
+        </div>
+        <div id="airdrops-panel" role="tabpanel" aria-labelledby="tab-airdrops" hidden>
+          <p class="muted small pad">Active, claimable and upcoming airdrops (AlphaDrops). Press Load.</p>
+        </div>
+      </section>
+
+      <section class="card" data-feature="news" aria-labelledby="news-title">
+        <div class="card-head">
+          <h2 id="news-title"><svg class="feat-icon" aria-hidden="true"><use href="#i-news"/></svg>Latest crypto news</h2>
+          <button id="news-refresh" type="button" class="small">Load</button>
         </div>
         <div id="news-meta" class="chips small muted"></div>
         <div id="trending" class="chips"></div>
-        <ul id="news-list" class="news-list"><li class="muted small">Loading headlines…</li></ul>
+        <ul id="news-list" class="news-list"><li class="muted small">News is loaded only when you ask, so nothing runs in the
+          background. Press Load (cached 15 minutes).</li></ul>
+        <label class="toggle small card-pref"><input id="news-auto" type="checkbox"> Load when the page opens</label>
       </section>
     </aside>
     </div>
@@ -255,6 +389,7 @@
     <a href="/api">API index</a>
     <a href="/health">Health</a>
     <span>Market data refreshes only when you ask (or with Auto-refresh on); signals only when you press Analyze now or switch on Auto-analyze.</span>
+    <span class="copyright">© <span id="year">2026</span> Shahriar Ahmed. All rights reserved.</span>
   </footer>
 
   <dialog id="detail" aria-labelledby="detail-title">

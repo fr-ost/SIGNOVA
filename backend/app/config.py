@@ -50,6 +50,8 @@ def normalize_database_url(url: str) -> tuple[str, dict[str, Any]]:
         if sslmode and sslmode != "disable":
             connect_args["ssl"] = sslmode
         url = urlunsplit(parts._replace(query=urlencode(query)))
+    elif url.startswith("sqlite"):
+        connect_args["timeout"] = 30  # wait for the single SQLite writer instead of failing at once
     return url, connect_args
 
 
@@ -60,7 +62,7 @@ class Settings(BaseSettings):
 
     # --- application ---------------------------------------------------------
     app_name: str = "Crypto Market Analysis & Spot Signal Dashboard"
-    app_version: str = "0.4.0-phase4"
+    app_version: str = "0.6.0-phase6"
     environment: Literal["development", "test", "production"] = "development"
     log_level: str = "INFO"
     json_logs: bool = True
@@ -106,7 +108,11 @@ class Settings(BaseSettings):
     cmc_public_base_url: str = "https://pro-api.coinmarketcap.com/public-api"
     cmc_pro_base_url: str = "https://pro-api.coinmarketcap.com"
     coingecko_base_url: str = "https://api.coingecko.com/api/v3"
-    coinpaprika_base_url: str = "https://api.coinpaprika.com/v1"
+    coingecko_pro_base_url: str = "https://pro-api.coingecko.com/api/v3"
+    coingecko_api_key: SecretStr | None = None  # optional; free Demo key (or a paid Pro key)
+    coingecko_plan: Literal["demo", "pro"] = "demo"
+    coinpaprika_base_url: str = "https://api.coinpaprika.com/v1"  # free plan, no key
+    coinpaprika_timeout_seconds: float = 30.0  # /tickers is a large download
     alternative_me_base_url: str = "https://api.alternative.me"
 
     # --- HTTP resilience ---------------------------------------------------------
@@ -191,8 +197,43 @@ class Settings(BaseSettings):
     )
     cryptocompare_news_url: str = "https://min-api.cryptocompare.com/data/v2/news/?lang=EN"
     openai_base_url: str = "https://api.openai.com/v1"
-    chat_max_output_tokens: int = 1500
+    chat_max_output_tokens: int = 1500  # visible answer; reasoning models get extra room
+    chat_reasoning_budget_tokens: int = 6000
+    chat_reasoning_effort: Literal["minimal", "low", "medium", "high"] = "low"
+    chat_model_options: CsvList = Field(
+        default_factory=lambda: ["gpt-5-mini", "gpt-5", "gpt-5-nano", "gpt-4.1", "gpt-4.1-mini", "gpt-4o", "gpt-4o-mini", "o4-mini"]
+    )
     chat_rate_limit_per_minute: int = 10
+
+    # --- Phase 5: sentiment and on-chain (free public sources) -------------------------
+    sentiment_cache_seconds: int = 600
+    onchain_cache_seconds: int = 600
+    min_refresh_seconds: int = 60  # a forced refresh never hits the sources more often
+    mempool_base_url: str = "https://mempool.space/api"
+    blockchain_info_url: str = "https://blockchain.info"
+    blockscout_eth_url: str = "https://eth.blockscout.com/api/v2"
+    defillama_stablecoins_url: str = "https://stablecoins.llama.fi"
+    binance_futures_url: str = "https://fapi.binance.com"
+    whale_min_btc: float = 100.0
+    whale_min_eth: float = 1000.0
+    whale_alert_api_key: SecretStr | None = None  # optional: labelled exchange flows, all chains
+    whale_alert_min_usd: int = 1_000_000
+
+    # --- scalp signals (15m / 1h / 4h) ----------------------------------------------------
+    scalp_slippage_pct: float = 0.02  # per side; fees come from the portfolio risk settings
+    scalp_min_risk_cost_multiple: float = 2.5  # the stop must be at least this many round-trip costs away
+    scalp_min_trades: int = 15  # backtest trades a coin needs before its own record counts
+    track_record_days: int = 90
+
+    # --- token unlocks and airdrops (optional keys) -------------------------------------
+    events_cache_seconds: int = 21600
+    mobula_base_url: str = "https://api.mobula.io/api/1"
+    mobula_api_key: SecretStr | None = None  # free key; token unlock schedules
+    alphadrops_base_url: str = "https://alphadrops.net/api/v1"
+    alphadrops_api_key: SecretStr | None = None  # AlphaDrops Developer API subscription
+    unlock_window_days: int = 30
+    unlock_note_min_pct: float = 1.0  # % of circulating supply that turns an unlock into a risk note
+    unlock_note_days: int = 14
 
     # --- Phase 2: risk engine (defaults match the risk_settings table) --------------------
     risk_max_per_signal_pct: float = 1.0
@@ -269,6 +310,40 @@ class Settings(BaseSettings):
         value = self.admin_token.get_secret_value().strip() if self.admin_token else ""
         return value or None
 
+    @staticmethod
+    def _secret(value: SecretStr | None) -> str | None:
+        text = value.get_secret_value().strip() if value else ""
+        return text or None
+
+    @property
+    def coingecko_key(self) -> str | None:
+        return self._secret(self.coingecko_api_key)
+
+    @property
+    def coingecko_url(self) -> str:
+        """Pro keys use the pro host; Demo keys and keyless calls the public host."""
+        return self.coingecko_pro_base_url if self.coingecko_key and self.coingecko_plan == "pro" else self.coingecko_base_url
+
+    @property
+    def coingecko_headers(self) -> dict[str, str]:
+        key = self.coingecko_key
+        if not key:
+            return {}
+        return {"x-cg-pro-api-key" if self.coingecko_plan == "pro" else "x-cg-demo-api-key": key}
+
+    @property
+    def mobula_key(self) -> str | None:
+        return self._secret(self.mobula_api_key)
+
+    @property
+    def alphadrops_key(self) -> str | None:
+        return self._secret(self.alphadrops_api_key)
+
+    @property
+    def whale_alert_key(self) -> str | None:
+        value = self.whale_alert_api_key.get_secret_value().strip() if self.whale_alert_api_key else ""
+        return value or None
+
     @property
     def chat_models(self) -> list[str]:
         models = [self.openai_analysis_model or "gpt-5-mini", self.openai_fallback_model or "gpt-4o-mini"]
@@ -281,7 +356,8 @@ class Settings(BaseSettings):
     def secret_values(self) -> list[str]:
         """Secrets that must be redacted from logs."""
         values = []
-        for secret in (self.openai_api_key, self.cmc_api_key, self.admin_token):
+        for secret in (self.openai_api_key, self.cmc_api_key, self.admin_token, self.whale_alert_api_key,
+                       self.coingecko_api_key, self.mobula_api_key, self.alphadrops_api_key):
             if secret is not None and secret.get_secret_value():
                 values.append(secret.get_secret_value())
         return values

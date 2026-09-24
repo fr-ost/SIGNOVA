@@ -31,6 +31,7 @@ from app.services.universe import UniverseAsset, UniverseService
 log = logging.getLogger(__name__)
 
 BREADTH_CANDLES = 250  # EMA50 plus warm-up; Bitcoin gets the full long history for EMA200
+BTC_4H_CANDLES = 300  # Bitcoin's short-term trend (EMA200 on 4H plus warm-up)
 
 Validator = Callable[[Timeframe, list[Candle]], tuple[list[Candle], CandleValidationReport]]
 
@@ -71,13 +72,28 @@ class MarketRegimeService:
             return asset.symbol, None, f"{asset.symbol} 1D: {report.critical_issues[0]}"
         return asset.symbol, compute_snapshot(Timeframe.D1, closed), None
 
+    async def _btc_4h(self, assets: list[UniverseAsset]) -> tuple[IndicatorSnapshot | None, str | None]:
+        btc = next((a for a in assets if a.symbol == "BTC"), None)
+        if btc is None:
+            return None, None
+        try:
+            raw, _ = await self._router.candles(btc.markets, Timeframe.H4, BTC_4H_CANDLES)
+        except NoMarketData as exc:
+            return None, f"BTC 4H: {exc}"
+        closed, report = self._validate(Timeframe.H4, raw)
+        if not report.ok:
+            return None, f"BTC 4H: {report.critical_issues[0]}"
+        return compute_snapshot(Timeframe.H4, closed), None
+
     async def _compute(self) -> MarketRegimeResult:
         universe = await self._universe.get()
         supported = [a for a in universe.assets if a.supported]
         semaphore = asyncio.Semaphore(max(1, self._s.signal_scan_concurrency))
-        results = await asyncio.gather(*(self._daily(a, semaphore) for a in supported))
+        results, (btc_4h, btc_4h_error) = await asyncio.gather(
+            asyncio.gather(*(self._daily(a, semaphore) for a in supported)), self._btc_4h(supported)
+        )
         snapshots = {symbol: snap for symbol, snap, _ in results if snap is not None}
-        errors: list[str] = [error for _, _, error in results if error]
+        errors: list[str] = [error for _, _, error in results if error] + ([btc_4h_error] if btc_4h_error else [])
         if "BTC" not in {a.symbol for a in universe.assets}:
             errors.append("BTC is not in the current universe")
         breadth = [s.close > s.ema50 for s in snapshots.values() if s.ema50 is not None]
@@ -90,6 +106,7 @@ class MarketRegimeService:
             global_metrics=context.global_metrics,
             min_breadth_sample=self._s.regime_min_breadth_sample,
             errors=errors + list(context.errors),
+            btc_4h=btc_4h,
         )
         await self._persist(result)
         return result
