@@ -41,10 +41,12 @@ from app.data.providers.coinmarketcap import CoinMarketCapClient
 from app.data.providers.coinpaprika import CoinPaprikaClient
 from app.data.providers.kraken import KrakenRestClient
 from app.database import create_engine_from_settings, create_session_factory
+from app.services.analysis import AnalysisService
 from app.services.assets import AssetService
 from app.services.context import MarketContextService
 from app.services.listing import ListingService
 from app.services.market import MarketService
+from app.services.regime import MarketRegimeService
 from app.services.spot_router import SpotMarketRouter
 from app.services.system_state import SystemStateStore
 from app.services.universe import UniverseService
@@ -77,6 +79,8 @@ class Container:
     context: MarketContextService
     market: MarketService
     assets: AssetService
+    regime: MarketRegimeService
+    analysis: AnalysisService
     stream: BinanceStreamManager | None = None
     live_prices: LivePriceBook = field(default_factory=LivePriceBook)
     cmc: CoinMarketCapClient | None = None
@@ -221,6 +225,8 @@ def build_container(
     assets = AssetService(
         settings, universe, listing, router, health, state, session_factory, reference=reference_candle_adapter
     )
+    regime = MarketRegimeService(settings, universe, router, context, assets.validate, session_factory)
+    analysis = AnalysisService(settings, universe, assets, regime, session_factory)
     live_prices = LivePriceBook()
     stream = BinanceStreamManager(settings.binance_ws_base_urls, live_prices.on_message)
     return Container(
@@ -236,6 +242,8 @@ def build_container(
         context=context,
         market=market,
         assets=assets,
+        regime=regime,
+        analysis=analysis,
         stream=stream,
         live_prices=live_prices,
         cmc=cmc_client,

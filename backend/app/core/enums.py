@@ -119,6 +119,21 @@ class GateStage(StrEnum):
     CANDLE_COMPLETENESS_CHECK = "CANDLE_COMPLETENESS_CHECK"
     SOURCE_CONSISTENCY_CHECK = "SOURCE_CONSISTENCY_CHECK"
     VOLATILITY_CHECK = "VOLATILITY_CHECK"
+    # Phase 2 signal pipeline stages (after the data stages above).
+    ANALYSIS_CHECK = "ANALYSIS_CHECK"
+    RISK_CHECK = "RISK_CHECK"
+    FINAL_VALIDATION = "FINAL_VALIDATION"
+
+
+# Stages evaluated by the Phase 1 data integrity gate, in order.
+DATA_GATE_STAGES: tuple[GateStage, ...] = (
+    GateStage.DATA_HEALTH_CHECK,
+    GateStage.MARKET_DATA_CHECK,
+    GateStage.TIMESTAMP_CHECK,
+    GateStage.CANDLE_COMPLETENESS_CHECK,
+    GateStage.SOURCE_CONSISTENCY_CHECK,
+    GateStage.VOLATILITY_CHECK,
+)
 
 
 class SignalLabel(StrEnum):
@@ -126,6 +141,61 @@ class SignalLabel(StrEnum):
     BUY = "BUY"
     WATCH = "WATCH"
     NO_TRADE = "NO TRADE"
+
+    @property
+    def rank(self) -> int:
+        return _SIGNAL_RANK[self]
+
+    def cap(self, maximum: SignalLabel) -> SignalLabel:
+        """The weaker of this label and `maximum`."""
+        return self if self.rank <= maximum.rank else maximum
+
+
+_SIGNAL_RANK = {SignalLabel.NO_TRADE: 0, SignalLabel.WATCH: 1, SignalLabel.BUY: 2, SignalLabel.STRONG_BUY: 3}
+
+
+class TrendDirection(StrEnum):
+    UP = "UP"
+    DOWN = "DOWN"
+    SIDEWAYS = "SIDEWAYS"
+
+
+class StructureTrend(StrEnum):
+    """Swing structure: higher highs/lows (BULLISH), lower highs/lows (BEARISH)."""
+
+    BULLISH = "BULLISH"
+    BEARISH = "BEARISH"
+    RANGE = "RANGE"
+    UNCLEAR = "UNCLEAR"
+
+
+class RegimeLabel(StrEnum):
+    TRENDING_UP = "TRENDING_UP"
+    TRENDING_DOWN = "TRENDING_DOWN"
+    RANGING = "RANGING"
+    TRANSITION = "TRANSITION"
+
+
+class VolatilityLevel(StrEnum):
+    LOW = "LOW"
+    NORMAL = "NORMAL"
+    HIGH = "HIGH"
+    UNKNOWN = "UNKNOWN"
+
+
+class MarketRegimeLabel(StrEnum):
+    BULL = "BULL"
+    BEAR = "BEAR"
+    NEUTRAL = "NEUTRAL"
+    UNKNOWN = "UNKNOWN"
+
+
+class RiskSeverity(StrEnum):
+    """Effect of a failed risk check on the signal label."""
+
+    BLOCK = "block"  # NO TRADE
+    CAP = "cap"  # at most WATCH
+    DOWNGRADE = "downgrade"  # at most BUY
 
 
 class Availability(StrEnum):

@@ -19,6 +19,7 @@
   --critical: #d03b3b;
   --neutral: #898781;
   --focus: #2a78d6;
+  --track: #cde2fb;
   --radius: 10px;
   --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
@@ -38,6 +39,7 @@
     --up: #0ca30c;
     --down: #e66767;
     --focus: #6da7ec;
+    --track: #184f95;
   }
 }
 
@@ -55,6 +57,7 @@
   --up: #0ca30c;
   --down: #e66767;
   --focus: #6da7ec;
+  --track: #184f95;
 }
 
 * { box-sizing: border-box; }
@@ -211,6 +214,31 @@ tbody tr.unsupported td { color: var(--muted); }
 .badge.large .badge-icon { width: 20px; height: 20px; font-size: 12px; }
 
 .delta { white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+/* ------------------------------------------------------------------ signals (Phase 2) */
+
+.chips { display: flex; flex-wrap: wrap; gap: 6px 18px; padding: 0 16px 12px; }
+.alert.inset { margin: 0 16px 12px; }
+.score-cell { display: flex; align-items: center; gap: 8px; }
+.score-cell .num { min-width: 2ch; }
+.meter {
+  display: inline-block; flex: none;
+  width: 56px; height: 6px;
+  border-radius: 3px; background: var(--track); overflow: hidden;
+}
+.meter-fill { display: block; height: 100%; border-radius: 3px; background: var(--accent); }
+.why { max-width: 340px; margin-top: 0; }
+.signal-headline { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 22px; padding: 14px 16px 6px; }
+.signal-summary { margin: 0; padding: 0 16px 14px; color: var(--ink-2); }
+.plain-list { margin: 0; padding: 2px 16px 12px 34px; }
+.plain-list li { margin: 2px 0; }
+.card-foot .plain-list { padding: 4px 0 0 18px; }
+.factors { padding: 0 0 6px; }
+.factor { padding: 10px 16px 0; border-top: 1px solid var(--grid); }
+.factor:first-child { border-top: 0; }
+.factor-head { display: flex; justify-content: space-between; gap: 12px; }
+.factor .meter { width: 100%; margin: 6px 0 4px; }
+.factor .plain-list { padding: 0 0 8px 18px; }
 .delta.up { color: var(--up); }
 .delta.down { color: var(--down); }
 
@@ -265,6 +293,11 @@ dialog#detail::backdrop { background: rgba(0, 0, 0, 0.45); }
   th:last-child, td:last-child { padding-right: 12px; }
   .hide-sm { display: none; }
   .reason { max-width: 160px; }
+  .why { max-width: 150px; }
+  .meter { width: 40px; }
+  .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .tile { padding: 12px; }
+  .tile-value { font-size: 21px; }
   .asset-cell { min-width: 0; }
   .detail-head { padding: 12px 16px; }
   .detail-body { padding: 12px 16px 28px; }

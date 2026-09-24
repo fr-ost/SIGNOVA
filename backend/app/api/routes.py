@@ -1,4 +1,5 @@
-"""Phase 1 API: health, system state, market overview, assets, candles, provider health."""
+"""API: health, system state, market overview, assets, candles, provider health (Phase 1);
+analysis, signals, market regime and signal history (Phase 2)."""
 
 from __future__ import annotations
 
@@ -12,18 +13,23 @@ from app.core.enums import Timeframe
 from app.core.timeutil import utcnow
 from app.database import check_database
 from app.schemas.api import (
+    AnalysisOut,
     AssetDetailOut,
     AssetListItemOut,
     AssetListOut,
     CandlesOut,
     ComponentHealth,
     HealthOut,
+    MarketRegimeOut,
     MarketSnapshotOut,
     OpenAIConfigStatus,
     ProviderHealthListOut,
     ProviderHealthOut,
+    SignalHistoryOut,
+    SignalScanOut,
     SystemStateOut,
 )
+from app.services.analysis import regime_out
 from app.services.container import Container
 
 router = APIRouter()
@@ -119,3 +125,34 @@ async def provider_health(c: ContainerDep) -> ProviderHealthListOut:
         providers=[ProviderHealthOut.model_validate(p) for p in c.health.snapshot()],
         live_stream=stream,
     )
+
+
+# ----------------------------------------------------------------------------- Phase 2
+
+
+@router.get("/api/market/regime", response_model=MarketRegimeOut, tags=["market"])
+async def market_regime(c: ContainerDep) -> MarketRegimeOut:
+    """Market regime from Bitcoin's daily trend and universe breadth; it caps every signal."""
+    return regime_out(await c.regime.current())
+
+
+@router.get("/api/assets/{symbol}/analysis", response_model=AnalysisOut, tags=["signals"])
+async def asset_analysis(symbol: SymbolPath, c: ContainerDep) -> AnalysisOut:
+    """Indicators, structure, regime, score, trade plan, risk checks and the final signal."""
+    return await c.analysis.analyze(symbol)
+
+
+@router.get("/api/signals", response_model=SignalScanOut, tags=["signals"])
+async def signals(c: ContainerDep) -> SignalScanOut:
+    """Signals for the whole universe, best first. Cached: at most one scan per cache period."""
+    return await c.analysis.scan()
+
+
+@router.get("/api/signals/history", response_model=SignalHistoryOut, tags=["signals"])
+async def signal_history(
+    c: ContainerDep,
+    symbol: Annotated[str | None, Query(min_length=1, max_length=20, pattern=r"^[A-Za-z0-9]+$")] = None,
+    limit: Annotated[int, Query(ge=1, le=500)] = 50,
+) -> SignalHistoryOut:
+    """Stored signals, newest first (a row per label change or new 4H setup candle)."""
+    return await c.analysis.history(symbol, limit)

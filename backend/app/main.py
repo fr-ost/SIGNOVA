@@ -141,7 +141,17 @@ def create_app(
             "dashboard": "/",
             "health": "/health",
             "docs": "/api/docs",
-            "endpoints": ["/api/market", "/api/assets", "/api/assets/{symbol}", "/api/provider-health"],
+            "endpoints": [
+                "/api/market",
+                "/api/market/regime",
+                "/api/signals",
+                "/api/signals/history",
+                "/api/assets",
+                "/api/assets/{symbol}",
+                "/api/assets/{symbol}/analysis",
+                "/api/assets/{symbol}/candles",
+                "/api/provider-health",
+            ],
         }
 
     app.include_router(router)

@@ -3,7 +3,7 @@ from datetime import timedelta
 
 import pytest
 
-from app.core.enums import CrossCheckStatus, DataState, GateStage, ProviderStatus, Timeframe
+from app.core.enums import DATA_GATE_STAGES, CrossCheckStatus, DataState, ProviderStatus, Timeframe
 from app.core.timeutil import utcnow
 from app.data.normalization.schemas import OrderBook, Ticker
 from app.data.normalization.stablecoins import classify_listing
@@ -231,7 +231,7 @@ def test_gate_passes_on_clean_data():
     result = IntegrityGate().evaluate(_inputs())
     assert result.passed and result.decision == "PASS"
     assert result.state == DataState.HEALTHY
-    assert [s.stage for s in result.stages] == list(GateStage)
+    assert [s.stage for s in result.stages] == list(DATA_GATE_STAGES)
     assert result.data_health_score >= 90
 
 

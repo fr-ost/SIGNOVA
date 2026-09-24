@@ -1,5 +1,6 @@
-// Phase 1 status dashboard: renders the existing JSON API. No build step, no dependencies.
-// Every provider-supplied string is inserted with textContent, never as HTML.
+// Status dashboard: Phase 1 market data and fail-safe checks, Phase 2 signals and analysis.
+// Renders the JSON API with no build step and no dependencies. Every provider-supplied
+// string is inserted with textContent, never as HTML.
 "use strict";
 
 (() => {
@@ -18,6 +19,11 @@
     IDLE: "neutral", ANALYZING: "good", LIVE_MONITORING: "good", EMERGENCY_STOP: "critical",
   };
   const ICON = { good: "✓", warning: "!", serious: "!", critical: "✕", neutral: "–" };
+  const SIGNALS_TIMEOUT_MS = 120000;
+  const SIGNAL_LABELS = ["STRONG BUY", "BUY", "WATCH", "NO TRADE"];
+  const SIGNAL_TONE = { "STRONG BUY": "good", BUY: "good", WATCH: "warning", "NO TRADE": "neutral" };
+  const OUTCOME_TONE = { PASS: "good", CAP: "warning", DOWNGRADE: "warning", BLOCK: "critical", NOT_RUN: "neutral" };
+  const REGIME_TONE = { BULL: "good", NEUTRAL: "warning", BEAR: "critical", UNKNOWN: "neutral" };
 
   const $ = (id) => document.getElementById(id);
 
@@ -94,15 +100,25 @@
 
   // ---------------------------------------------------------------- building blocks
 
-  function badge(value, label, extraClass) {
-    const tone = TONE[value] || "neutral";
+  function toneBadge(tone, label, extraClass) {
     return h(
       "span",
       { class: `badge tone-${tone}${extraClass ? " " + extraClass : ""}` },
       h("span", { class: "badge-icon", "aria-hidden": "true", text: ICON[tone] }),
-      label ?? humanize(value),
+      label,
     );
   }
+
+  const badge = (value, label, extraClass) => toneBadge(TONE[value] || "neutral", label ?? humanize(value), extraClass);
+  const signalBadge = (label, text, extraClass) => toneBadge(SIGNAL_TONE[label] || "neutral", text ?? humanize(label), extraClass);
+
+  function meter(value, max = 100) {
+    const fill = h("span", { class: "meter-fill" });
+    fill.style.width = `${Math.max(0, Math.min(100, (value / max) * 100))}%`; // CSSOM, allowed by the CSP
+    return h("span", { class: "meter", "aria-hidden": "true" }, fill);
+  }
+
+  const plainList = (items, cls) => h("ul", { class: `plain-list${cls ? " " + cls : ""}` }, items.map((t) => h("li", { text: t })));
 
   function delta(value, digits = 2) {
     if (value == null) return h("span", { class: "muted", text: DASH });
@@ -145,9 +161,9 @@
 
   // ---------------------------------------------------------------- network
 
-  async function getJSON(url) {
+  async function getJSON(url, timeoutMs = REQUEST_TIMEOUT_MS) {
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS);
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
       const res = await fetch(url, { headers: { Accept: "application/json" }, signal: ctrl.signal });
       let body = null;
@@ -394,6 +410,82 @@
     $("stream-meta").textContent = `${ph.providers.length} providers`;
   }
 
+  // ---------------------------------------------------------------- signals (Phase 2)
+
+  function signalRow(row) {
+    const actionable = row.signal === "BUY" || row.signal === "STRONG BUY";
+    const planCls = `num hide-sm${actionable ? "" : " muted"}`;
+    const open = () => openDetail(row.symbol);
+    const stopPct = row.stop_loss != null && row.entry_high ? ((row.entry_high - row.stop_loss) / row.entry_high) * 100 : null;
+    return h(
+      "tr",
+      { class: "clickable", onclick: open },
+      h(
+        "td",
+        {},
+        h(
+          "div",
+          { class: "asset-cell" },
+          h("button", {
+            type: "button",
+            class: "link-button",
+            text: row.symbol,
+            "aria-label": `Open the analysis for ${row.symbol}`,
+            onclick: (e) => { e.stopPropagation(); open(); },
+          }),
+          h("span", { class: "muted small", text: row.name }),
+        ),
+      ),
+      h("td", {}, signalBadge(row.signal)),
+      h("td", {}, h("div", { class: "score-cell" }, h("span", { class: "num", text: row.score }), meter(row.score))),
+      h("td", { class: "hide-sm", text: humanize(row.trend) }),
+      h("td", { class: planCls, title: actionable ? null : "WATCH plan: not a buy signal" },
+        row.entry_low != null ? [fmtPrice(row.entry_low), h("div", { class: "small muted", text: `to ${fmtPrice(row.entry_high)}` })] : DASH),
+      h("td", { class: planCls },
+        row.stop_loss != null ? [fmtPrice(row.stop_loss), h("div", { class: "small muted", text: `−${stopPct.toFixed(1)}%` })] : DASH),
+      h("td", { class: planCls },
+        row.take_profit_1 != null ? [fmtPrice(row.take_profit_1), h("div", { class: "small muted", text: fmtPrice(row.take_profit_2) })] : DASH),
+      h("td", { class: planCls, text: row.reward_risk != null ? `${row.reward_risk.toFixed(1)}R` : DASH }),
+      h("td", { class: "num hide-sm", text: row.suggested_allocation_pct != null ? `${row.suggested_allocation_pct.toFixed(1)}%` : DASH }),
+      h("td", {}, h("span", { class: "reason why", title: row.reasons.join("\n") || null, text: row.reasons[0] || row.summary })),
+    );
+  }
+
+  function renderSignals(scan) {
+    const m = scan.market_regime;
+    $("regime-state").replaceChildren(toneBadge(REGIME_TONE[m.regime] || "neutral", `Market: ${humanize(m.regime)}`));
+    const breadth = m.breadth_pct == null ? "breadth n/a" : `${Math.round(m.breadth_pct)}% above daily EMA50`;
+    $("signals-meta").textContent =
+      `${humanize(m.regime)} market, signals up to ${humanize(m.max_signal)} · BTC daily ${m.btc_trend ? m.btc_trend.toLowerCase() : "n/a"} · ${breadth} · scanned ${fmtTime(scan.generated_at)}`;
+    $("signal-counts").replaceChildren(
+      ...SIGNAL_LABELS.map((label) => signalBadge(label, `${humanize(label)} ${scan.counts[label] || 0}`, "chip")),
+    );
+    const rows = scan.signals.map(signalRow);
+    $("signal-rows").replaceChildren(
+      ...(rows.length ? rows : [h("tr", {}, h("td", { colspan: 10, class: "empty", text: "No assets to analyse." }))]),
+    );
+    const box = $("signals-error");
+    if (scan.errors.length) setMessage(box, "Some assets could not be analysed", scan.errors.slice(0, 5));
+    else box.hidden = true;
+  }
+
+  let signalsLoading = false;
+
+  async function refreshSignals() {
+    if (signalsLoading) return;
+    signalsLoading = true;
+    try {
+      renderSignals(await getJSON("/api/signals", SIGNALS_TIMEOUT_MS));
+    } catch (err) {
+      setMessage($("signals-error"), "Signals unavailable", [err.message]);
+      if ($("signal-rows").querySelector(".empty")) {
+        $("signal-rows").replaceChildren(h("tr", {}, h("td", { colspan: 10, class: "empty", text: "Signals unavailable." })));
+      }
+    } finally {
+      signalsLoading = false;
+    }
+  }
+
   // ---------------------------------------------------------------- refresh loop
 
   let timer = null;
@@ -436,14 +528,19 @@
     loading = false;
   }
 
+  function refreshAll() {
+    refresh();
+    refreshSignals();
+  }
+
   function schedule() {
     clearInterval(timer);
     timer = null;
-    if (document.visibilityState === "visible") timer = setInterval(refresh, REFRESH_MS);
+    if (document.visibilityState === "visible") timer = setInterval(refreshAll, REFRESH_MS);
   }
 
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible") refresh();
+    if (document.visibilityState === "visible") refreshAll();
     schedule();
   });
 
@@ -462,25 +559,231 @@
     const token = ++detailToken;
     $("detail-title").textContent = symbol;
     $("detail-body").replaceChildren(
-      h("p", { class: "muted", text: `Collecting ${symbol}: 5 timeframes of candles, order book and cross-checks…` }),
+      h("p", { class: "muted", text: `Analysing ${symbol}: 5 timeframes of candles, order book, cross-checks and the signal engine…` }),
     );
     if (!d.open) d.showModal();
     if (location.hash !== `#${symbol}`) history.replaceState(null, "", `#${symbol}`);
-    try {
-      const detail = await getJSON(`/api/assets/${encodeURIComponent(symbol)}`);
-      if (token === detailToken) renderDetail(detail);
-    } catch (err) {
-      if (token !== detailToken) return;
-      const body = $("detail-body");
+    const path = `/api/assets/${encodeURIComponent(symbol)}`;
+    const [analysis, detail] = await Promise.allSettled([getJSON(`${path}/analysis`, SIGNALS_TIMEOUT_MS), getJSON(path)]);
+    if (token !== detailToken) return;
+    const failure = (title, err) => {
       const box = h("div", { class: "alert", role: "alert" });
       const extra = err.body && Array.isArray(err.body.errors) ? err.body.errors : [];
-      setMessage(box, `Could not load ${symbol}: ${err.message}`, extra);
-      body.replaceChildren(box);
-    }
+      setMessage(box, `${title}: ${err.message}`, extra);
+      return box;
+    };
+    const parts = [];
+    const head = analysis.status === "fulfilled" ? analysis.value : detail.status === "fulfilled" ? detail.value : null;
+    if (head) $("detail-title").textContent = `#${head.universe_rank} ${head.symbol} · ${head.name}`;
+    if (analysis.status === "fulfilled") parts.push(...renderAnalysis(analysis.value));
+    else parts.push(failure(`Analysis of ${symbol} unavailable`, analysis.reason));
+    if (detail.status === "fulfilled") parts.push(...renderDetail(detail.value));
+    else if (analysis.status === "fulfilled") parts.push(failure("Data collection details unavailable", detail.reason));
+    $("detail-body").replaceChildren(...parts);
   }
 
+  // Phase 2: signal, plan, reasons, score, pipeline, risk checks, indicators, structure.
+  function planCard(plan) {
+    const q = plan.quote_asset;
+    const targets = table(
+      [["Target"], ["Price", "num"], ["R", "num"], ["Sell", "num"], ["Basis", "hide-sm"]],
+      plan.targets.map((t, i) =>
+        h(
+          "tr",
+          {},
+          h("td", {}, h("strong", { text: `TP${i + 1}` })),
+          h("td", { class: "num", text: fmtPrice(t.price) }),
+          h("td", { class: "num", text: `${t.r_multiple.toFixed(2)}R` }),
+          h("td", { class: "num", text: `${Math.round(t.allocation_pct)}%` }),
+          h("td", { class: "hide-sm muted", text: t.basis }),
+        ),
+      ),
+    );
+    const notes = [
+      `Stop: ${plan.stop_basis}.`,
+      `Invalidation: ${plan.invalidation}.`,
+      plan.better_entry_below != null ? `Reward:risk reaches the minimum at an entry of ${fmtPrice(plan.better_entry_below)} or lower.` : null,
+      ...plan.notes.map((n) => `Note: ${n}.`),
+    ].filter(Boolean);
+    return card(
+      plan.actionable ? "Trade plan" : "Watch plan (not a buy signal)",
+      `${q} · spot only`,
+      h(
+        "dl",
+        { class: "detail-grid" },
+        kv("Entry zone", `${fmtPrice(plan.entry_low)} to ${fmtPrice(plan.entry_high)}`),
+        kv("Stop loss", `${fmtPrice(plan.stop_loss)} (−${plan.stop_distance_pct.toFixed(2)}%)`),
+        kv("Reward:risk (net)", `${plan.reward_risk.toFixed(2)}R to TP2 · ${plan.reward_risk_tp1.toFixed(2)}R to TP1`),
+        kv("Room to resistance", plan.room_to_resistance_r == null
+          ? "none overhead"
+          : `${plan.room_to_resistance_r.toFixed(2)}R (${fmtPrice(plan.nearest_resistance)})`),
+        kv("Suggested size", plan.actionable
+          ? `${plan.suggested_allocation_pct.toFixed(1)}% of portfolio (risks ${plan.risk_at_allocation_pct.toFixed(2)}%)`
+          : DASH),
+        kv("Costs", `${plan.cost_pct.toFixed(2)}% round trip (fees + slippage)`),
+      ),
+      targets,
+      h("div", { class: "card-foot small muted" }, notes.map((n) => h("div", { text: n }))),
+    );
+  }
+
+  function factorList(factors) {
+    return h(
+      "div",
+      { class: "factors" },
+      factors.map((f) =>
+        h(
+          "div",
+          { class: "factor" },
+          h(
+            "div",
+            { class: "factor-head" },
+            h("span", { class: "stage-name", text: f.name }),
+            h("span", { class: "num", text: `${Math.round(f.score * 10) / 10} / ${f.max_score}` }),
+          ),
+          meter(f.score, f.max_score),
+          f.positives.length ? plainList(f.positives.map((t) => `+ ${t}`), "small") : null,
+          f.negatives.length ? plainList(f.negatives.map((t) => `− ${t}`), "small muted") : null,
+        ),
+      ),
+    );
+  }
+
+  const outcomeLabel = { PASS: "Pass", CAP: "Caps at Watch", DOWNGRADE: "Caps at Buy", BLOCK: "Blocks", NOT_RUN: "Not run" };
+  const severityOutcome = { block: "BLOCK", cap: "CAP", downgrade: "DOWNGRADE" };
+
+  function renderAnalysis(a) {
+    const regimeByTf = Object.fromEntries(a.regimes.map((r) => [r.timeframe, r]));
+    const parts = [];
+    parts.push(
+      h(
+        "section",
+        { class: "card" },
+        h(
+          "div",
+          { class: "signal-headline" },
+          signalBadge(a.signal, null, "large"),
+          h("div", {}, h("span", { class: "score", text: a.score }), h("span", { class: "unit", text: " / 100 score" })),
+          h("span", { class: "muted small", text: `Trend ${humanize(a.trend).toLowerCase()} · ${a.setup_timeframe} setup · ${humanize(a.market_regime.regime).toLowerCase()} market` }),
+        ),
+        h("p", { class: "signal-summary", text: a.summary }),
+      ),
+    );
+    if (a.plan) parts.push(planCard(a.plan));
+    parts.push(
+      card(
+        "Why",
+        a.signal === "BUY" || a.signal === "STRONG BUY" ? "supporting evidence" : "what holds it back, then what supports it",
+        plainList(a.reasons),
+        a.risks.length ? h("div", { class: "card-foot" }, h("strong", { class: "small", text: "Risks to keep in mind" }), plainList(a.risks, "small")) : null,
+      ),
+    );
+    parts.push(card("Score breakdown", `${a.score}/100 · ${humanize(a.score_label)} before risk and data checks`, factorList(a.factors)));
+    parts.push(
+      card(
+        "Signal pipeline",
+        "a block anywhere means NO TRADE",
+        h(
+          "ol",
+          { class: "stages" },
+          a.pipeline.map((s) =>
+            h(
+              "li",
+              {},
+              h(
+                "div",
+                { class: "stage-row" },
+                toneBadge(OUTCOME_TONE[s.outcome] || "neutral", humanize(s.stage.replace(/_CHECK$/, "")), "stage-name"),
+                toneBadge(OUTCOME_TONE[s.outcome] || "neutral", outcomeLabel[s.outcome] || s.outcome),
+              ),
+              s.reasons.length ? h("ul", {}, s.reasons.map((r) => h("li", { text: r }))) : null,
+            ),
+          ),
+        ),
+      ),
+    );
+    parts.push(
+      card(
+        "Risk checks",
+        null,
+        table(
+          [["Check"], ["Result"], ["Detail", "hide-sm"]],
+          a.risk_checks.map((c) =>
+            h(
+              "tr",
+              {},
+              h("td", { text: c.name }),
+              h("td", {}, c.passed ? toneBadge("good", "Pass") : toneBadge(OUTCOME_TONE[severityOutcome[c.severity]], outcomeLabel[severityOutcome[c.severity]])),
+              h("td", { class: "hide-sm muted", text: c.detail }),
+            ),
+          ),
+        ),
+      ),
+    );
+    const num = (v, d = 2) => (v == null ? DASH : v.toFixed(d));
+    parts.push(
+      card(
+        "Indicators",
+        "last closed candle per timeframe",
+        table(
+          [["TF"], ["Close", "num"], ["EMA20", "num hide-sm"], ["EMA50", "num hide-sm"], ["EMA200", "num hide-sm"], ["RSI", "num"],
+            ["MACD hist", "num hide-sm"], ["ADX", "num hide-sm"], ["ATR %", "num hide-sm"], ["%B", "num hide-sm"], ["Regime"]],
+          a.indicators.map((i) => {
+            const r = regimeByTf[i.timeframe];
+            return h(
+              "tr",
+              {},
+              h("td", {}, h("strong", { text: i.label })),
+              h("td", { class: "num", text: fmtPrice(i.close) }),
+              h("td", { class: "num hide-sm", text: fmtPrice(i.ema20) }),
+              h("td", { class: "num hide-sm", text: fmtPrice(i.ema50) }),
+              h("td", { class: "num hide-sm", text: fmtPrice(i.ema200) }),
+              h("td", { class: "num", text: num(i.rsi14, 0) }),
+              h("td", { class: "num hide-sm", text: i.macd_hist == null ? DASH : fmtPrice(i.macd_hist) }),
+              h("td", { class: "num hide-sm", text: num(i.adx14, 0) }),
+              h("td", { class: "num hide-sm", text: num(i.atr_pct) }),
+              h("td", { class: "num hide-sm", text: num(i.bb_pct_b) }),
+              h("td", { class: "small", text: r ? humanize(r.regime) : DASH }),
+            );
+          }),
+        ),
+      ),
+    );
+    const levels = (list) => (list.length ? list.slice(0, 2).map((l) => fmtPrice(l.price)).join(", ") : DASH);
+    parts.push(
+      card(
+        "Market structure",
+        "confirmed swing points; levels nearest first",
+        table(
+          [["TF"], ["Structure"], ["Last break", "hide-sm"], ["Support"], ["Resistance"]],
+          a.structure.map((s) =>
+            h(
+              "tr",
+              {},
+              h("td", {}, h("strong", { text: s.label })),
+              h("td", { title: s.reason }, humanize(s.trend)),
+              h("td", { class: "hide-sm small" },
+                s.last_break ? `${s.last_break.direction === "UP" ? "Above" : "Below"} ${fmtPrice(s.last_break.level)}, ${s.last_break.candles_ago} candles ago` : DASH),
+              h("td", { class: "num", text: levels(s.supports) }),
+              h("td", { class: "num", text: levels(s.resistances) }),
+            ),
+          ),
+        ),
+      ),
+    );
+    parts.push(
+      h(
+        "p",
+        { class: "muted small" },
+        `${a.disclaimer} Engine ${a.engine_version} · generated ${fmtTime(a.generated_at)} · `,
+        h("a", { href: `/api/assets/${encodeURIComponent(a.symbol)}/analysis`, target: "_blank", rel: "noopener", text: "raw JSON" }),
+      ),
+    );
+    return parts;
+  }
+
+  // Phase 1: data integrity, price, candles, cross-checks, order book, volatility.
   function renderDetail(a) {
-    $("detail-title").textContent = `#${a.universe_rank} ${a.symbol} · ${a.name}`;
     const g = a.integrity;
     const parts = [];
 
@@ -493,7 +796,7 @@
     const components = Object.entries(g.components).map(([k, v]) => kv(humanize(k), `${Math.round(v * 100)}%`));
     parts.push(
       card(
-        "Integrity gate",
+        "Data integrity gate",
         `checked ${fmtTime(g.checked_at)}`,
         h(
           "div",
@@ -632,11 +935,11 @@
       h(
         "p",
         { class: "muted small" },
-        `Generated ${fmtTime(a.generated_at)} · `,
+        `Data collected ${fmtTime(a.generated_at)} · `,
         h("a", { href: `/api/assets/${encodeURIComponent(a.symbol)}`, target: "_blank", rel: "noopener", text: "raw JSON" }),
       ),
     );
-    $("detail-body").replaceChildren(...parts);
+    return parts;
   }
 
   // ---------------------------------------------------------------- theme
@@ -672,7 +975,7 @@
       }
     });
 
-    $("refresh").addEventListener("click", refresh);
+    $("refresh").addEventListener("click", refreshAll);
     $("detail-close").addEventListener("click", closeDetail);
     dialog().addEventListener("close", () => {
       detailToken++;
@@ -682,7 +985,7 @@
       if (e.target === dialog()) closeDetail();
     });
 
-    refresh();
+    refreshAll();
     schedule();
     const hash = decodeURIComponent(location.hash.slice(1));
     if (/^[A-Za-z0-9]{1,20}$/.test(hash)) openDetail(hash.toUpperCase());

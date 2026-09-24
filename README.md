@@ -12,8 +12,8 @@ Nothing in this project promises profitability or accuracy.
 | Phase | Scope | Status |
 |---|---|---|
 | 1 | Railway, PostgreSQL, provider adapters, Binance, CMC Top 20, health and fail-safe | **Done** |
-| 2 | Historical data, indicators, structure, regime, quantitative signal and risk engine | Next |
-| 3 | On-demand controls, dashboard UI, charts, live updates | |
+| 2 | Historical data, indicators, structure, regime, quantitative signal and risk engine | **Done** |
+| 3 | On-demand controls, dashboard UI, charts, live updates | Next |
 | 4 | Portfolio, risk, allocation, DCA, P/L scenarios | |
 | 5 | News, sentiment, whale / on-chain | |
 | 6 | Alerts | |
@@ -30,7 +30,9 @@ data integrity -> fail-safe validation -> deterministic calculations -> risk eng
 ```
 
 The LLM can never override stale data, source conflicts, missing candles, abnormal prices,
-failed risk checks, an emergency stop or a circuit breaker. Phase 1 builds the first two layers.
+failed risk checks, an emergency stop or a circuit breaker. Phase 1 built the first two layers;
+Phase 2 adds the deterministic calculations, the risk engine, the quantitative signal engine and
+the final deterministic validation.
 
 ## Data sources (all keyless)
 
@@ -119,7 +121,86 @@ becomes `UNVERIFIED`, which blocks signals while `REQUIRE_PRICE_CROSS_VALIDATION
 The data health score (0 to 100) weights freshness 30%, completeness 30%, cross-source
 consistency 25% and provider health 15%. It is informational; the gate decision is stricter.
 
-## API (Phase 1)
+## Signals (Phase 2)
+
+Spot long only. The engine is deterministic: the same candles always give the same signal, and
+every point of the score and every limit is explained in the API and on the dashboard. The score
+ranks setups; it is **not a probability**, and there is no measured track record until signal
+tracking and backtesting arrive in Phase 8.
+
+**Strategy:** multi-timeframe trend following with pullback entries. 1D sets the primary trend,
+4H is the setup timeframe, 1H confirms momentum, 15m times the entry.
+
+**Pipeline** (the label can only be lowered after scoring, never raised):
+
+```
+integrity gate (6 data stages) -> ANALYSIS_CHECK -> score -> trade plan
+-> RISK_CHECK (block / cap / downgrade) -> market regime cap -> FINAL_VALIDATION -> label
+```
+
+A failed data stage, a failed analysis check, a blocking risk check or a final-validation
+violation always means `NO TRADE`.
+
+**Score (0 to 100):**
+
+| Factor | Points | Looks at |
+|---|---|---|
+| Trend alignment | 30 | EMA20/50/200 alignment and swing structure on 1D, 4H, 1H; 4H ADX and +DI/-DI |
+| Momentum | 20 | RSI(14) zones and MACD histogram level and direction on 4H and 1H |
+| Market structure | 15 | 4H higher highs/lows, latest break of structure, nearby support, room to resistance |
+| Entry location | 15 | distance from the 4H EMA20 in ATRs, Bollinger %B, 15m RSI |
+| Volume | 10 | 4H on-balance volume trend, buying versus selling volume on 4H and 1H |
+| Market context | 10 | market regime, 20-day performance versus Bitcoin |
+
+**Labels:** `STRONG BUY` from 80, `BUY` from 65, `WATCH` from 50, otherwise `NO TRADE`
+(thresholds configurable), then limited by the risk checks and the market regime.
+`WATCH` means "a setup exists but not now" and carries a non-actionable watch plan with the
+reason (for example "wait for a breakout above X" or "extended: wait for a pullback").
+
+**Trade plan** (quote currency, spot):
+
+* Entry zone from the live price down to 0.5 ATR (4H) below it. Reward:risk is measured from the
+  top of the zone, the least favourable fill.
+* Stop 0.25 ATR below the most recent 4H swing low under the entry zone, kept between 1 and 3 ATR
+  from the entry (2 ATR without a swing low).
+* TP1 is the nearest overhead resistance (4H and 1D swing clusters) however close; TP2 and TP3 the
+  next levels. Without resistance (price discovery) targets are labelled 1.5R / 3R / 4.5R
+  projections. Suggested scale-out 40% / 35% / 25%.
+* Reward:risk is net of round-trip fees and slippage (0.1% + 0.05% per side by default), at TP2.
+* Size: the portfolio share that loses at most `RISK_MAX_PER_SIGNAL_PCT` (1%) if the stop is hit,
+  capped at `RISK_MAX_ALLOCATION_PCT` (10%).
+
+**Risk checks:**
+
+| Effect | Checks |
+|---|---|
+| Block (`NO TRADE`) | order book missing or invalid, spread above 30 bps, less than $25,000 depth within 1% on either side, 24h volume below $5M |
+| Cap (at most `WATCH`) | 1D or 4H trend down, net reward:risk below 1.5R, nearest resistance closer than 0.75R, stop wider than 15%, price more than 2.5 ATR above the 4H EMA20, RSI above 78 (4H) or 80 (1D), 24h move above +25%, bear or unknown market regime |
+| Downgrade (at most `BUY`) | 1D and 4H not both up, net reward:risk below 2R, resistance closer than 1R, 15m RSI above 85, 4H volatility at the 95th percentile, neutral market regime |
+
+**Market regime:** Bitcoin's daily trend (EMA50/EMA200 and slope) plus breadth, the share of the
+universe trading above its daily EMA50. `BULL` allows every label, `NEUTRAL` at most `BUY`, `BEAR`
+and `UNKNOWN` (Bitcoin data unavailable) at most `WATCH`. Fear & Greed extremes and high Bitcoin
+volatility are reported as risks.
+
+**Indicators** are pure Python, computed on validated closed candles only (Wilder RSI/ATR/ADX, EMA
+seeded with its SMA, population-deviation Bollinger Bands, MACD, OBV, ROC). They are tested against
+the published StockCharts RSI example and cross-checked with the `ta` library. Swing structure
+uses confirmed pivots only, so nothing repaints. 4H and 1D use 1,000 candles of history so the
+EMA200 is fully warmed up.
+
+**History:** every analysis stores its 1H/4H/1D indicator snapshot once per closed candle
+(`technical_features`), a signal row with its targets when the label changes or a new 4H setup
+candle closes (`signals`, `signal_targets`, including the full inputs and outputs for later
+backtesting), and the market regime at most hourly or on change (`market_regimes`).
+
+**Provider usage:** a full scan analyses the whole universe with at most 4 assets in parallel and
+is cached for 2 minutes, so any number of open dashboards triggers at most one scan per 2 minutes
+(about 350 Binance request weight of the 6,000 per-minute limit). CoinMarketCap candle
+cross-checks stay cached per asset (30 minutes for 1H, 6 hours for 1D) under the credit pacing
+described above.
+
+## API
 
 | Endpoint | Description |
 |---|---|
@@ -132,22 +213,28 @@ consistency 25% and provider health 15%. It is informational; the gate decision 
 | `GET /api/assets/{symbol}` | Full collection on 5 timeframes, order book, cross-check, volatility, integrity gate |
 | `GET /api/assets/{symbol}/candles?timeframe=1H&limit=300` | Validated closed candles plus the forming candle, separately |
 | `GET /api/provider-health` | Status, latency, errors, rate limits and circuit state per provider |
+| `GET /api/signals` | Phase 2: signal for every universe asset, best first, with the market regime (cached 2 minutes) |
+| `GET /api/assets/{symbol}/analysis` | Phase 2: indicators, structure, regimes, score factors, trade plan, risk checks, full pipeline |
+| `GET /api/market/regime` | Phase 2: market regime and the signal cap it applies |
+| `GET /api/signals/history?symbol=BTC&limit=50` | Phase 2: stored signals with their targets, newest first |
 
 Interactive docs: `/api/docs`. Expensive endpoints are cached with single-flight loading, so
 many open tabs never multiply provider calls.
 
-## Status dashboard (Phase 1)
+## Status dashboard
 
-Opening the service URL shows a read-only status page built on the API above: market context
-(total market cap, BTC dominance, Fear & Greed, Altcoin Season), the Top 20 with live price,
-24h change, price cross-check and data state, and provider health including CoinMarketCap
-credit usage. Selecting an asset loads `/api/assets/{symbol}` and shows every integrity-gate
-stage, candle completeness per timeframe, order book and volatility.
+Opening the service URL shows a read-only page built on the API above: the market regime,
+market context (total market cap, BTC dominance, Fear & Greed, Altcoin Season), the signals
+table (label, score, trend, entry zone, stop, TP1/TP2, net reward:risk, suggested size and the
+main reason), the Top 20 with live price, 24h change, price cross-check and data state, and
+provider health including CoinMarketCap credit usage. Selecting an asset shows its signal,
+trade plan, reasons and risks, score breakdown, the full pipeline, every risk check,
+indicators and structure per timeframe, then the Phase 1 integrity details.
 
 It is plain HTML, CSS and JavaScript in `backend/app/static` with no build step and no
 third-party scripts (strict Content-Security-Policy). It refreshes every 30 seconds only while
-the tab is visible, so a background tab spends no provider calls or credits. It shows no
-trading signals; the React dashboard in Phase 3 replaces it.
+the tab is visible, so a background tab spends no provider calls or credits. The React
+dashboard in Phase 3 replaces it.
 
 ## Deploy on Railway
 
@@ -168,7 +255,28 @@ trading signals; the React dashboard in Phase 3 replaces it.
    plan's credit limit. `"pro_disabled"` means the key was rejected (the reason is shown).
 
 Migrations run automatically on start (`scripts/start.sh`). The app runs as one worker by
-design: system state, caches and the live stream are in-process.
+design: system state, caches and the live stream are in-process. Phase 2 needs no new
+migration: it fills tables created by the initial schema.
+
+## Configuration (Phase 2)
+
+Every setting has a safe default; override any of them as a Railway variable.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `SIGNAL_MIN_SCORE_STRONG_BUY` / `_BUY` / `_WATCH` | 80 / 65 / 50 | score thresholds |
+| `RISK_MAX_PER_SIGNAL_PCT` | 1.0 | portfolio % lost if a stop is hit (drives the suggested size) |
+| `RISK_MAX_ALLOCATION_PCT` | 10.0 | largest suggested position, % of portfolio |
+| `RISK_FEE_PCT` / `RISK_SLIPPAGE_PCT` | 0.1 / 0.05 | per side, used for net reward:risk and sizing |
+| `RISK_MIN_REWARD_RISK` / `RISK_STRONG_MIN_REWARD_RISK` | 1.5 / 2.0 | net reward:risk at TP2 for BUY / STRONG BUY |
+| `RISK_MIN_ROOM_R` / `RISK_STRONG_MIN_ROOM_R` | 0.75 / 1.0 | room to the nearest resistance, in R |
+| `RISK_MAX_STOP_PCT` | 15 | widest stop allowed |
+| `RISK_MAX_SPREAD_BPS` / `RISK_MIN_DEPTH_USD` / `RISK_MIN_VOLUME_24H_USD` | 30 / 25000 / 5000000 | liquidity limits |
+| `RISK_MAX_EXTENSION_ATR` / `RISK_MAX_CHANGE_24H_PCT` | 2.5 / 25 | chasing limits |
+| `SIGNAL_SCAN_CACHE_SECONDS` / `SIGNAL_SCAN_CONCURRENCY` | 120 / 4 | scan cadence and parallelism |
+| `REGIME_CACHE_SECONDS` | 600 | market regime refresh |
+| `CANDLE_FETCH_LIMIT` / `CANDLE_FETCH_LIMIT_LONG` | 500 / 1000 | candles per request (5m-1H / 4H-1D) |
+| `SIGNAL_PERSIST_ENABLED` / `FEATURE_PERSIST_TIMEFRAMES` | true / 1h,4h,1d | history storage |
 
 ## Local development
 
@@ -200,7 +308,15 @@ listing parsers, listing fallback, stablecoin and derivative exclusion, candle v
 checks, order book sanity, volatility breaker, every integrity-gate stage, universe building,
 market snapshot states and failover, API endpoints and error mapping, persistence and upserts
 (SQLite and PostgreSQL), and the WebSocket manager (resubscribe, stale watchdog, renewal).
-Fake adapters exist only in `backend/tests`; production code never generates data.
+
+Phase 2: indicator math against published and library reference values, swing pivots, structure,
+change of character, level clustering, timeframe and market regimes, and the full engine on
+deterministic synthetic markets sampled into consistent 5m-1D candles (strong uptrend, downtrend,
+parabolic move, failed integrity gate, wide spread, bear and neutral regimes, missing history,
+unsupported asset, STRONG BUY downgrades), trade-plan math net of costs, sizing, final validation,
+and the Phase 2 endpoints with persistence and de-duplication (SQLite and PostgreSQL).
+Fake adapters and synthetic markets exist only in `backend/tests`; production code never
+generates data.
 
 ## Project structure
 
@@ -218,8 +334,11 @@ backend/
       validation/        candles, candle-history reference, prices, order book, volatility,
                          listings, health score, gate
       health.py, http.py provider health registry, resilient HTTP client
-    services/            universe, listing, spot router, market, assets, context, persistence
-    static/              Phase 1 status dashboard (HTML, CSS, JS; no build step)
+    analysis/            indicators, features, structure, regime, scoring, engine, final validation
+    risk/                risk parameters, trade plan, risk checks
+    services/            universe, listing, spot router, market, assets, context, persistence,
+                         market regime, analysis (signals, scan, history)
+    static/              status dashboard (HTML, CSS, JS; no build step)
     models/              20 SQLAlchemy tables
     schemas/             API response models
   migrations/            Alembic
@@ -228,4 +347,4 @@ scripts/start.sh
 Dockerfile, railway.json, .env.example
 ```
 
-Later phases add `analysis/`, `risk/`, `ml/`, `ai/`, `workers/` and `frontend/`.
+Later phases add `ml/`, `ai/`, `workers/` and `frontend/`.

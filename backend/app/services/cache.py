@@ -15,8 +15,11 @@ T = TypeVar("T")
 
 
 class AsyncTTLCache:
-    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
+    def __init__(self, clock: Callable[[], float] = time.monotonic, *, prune_expired: bool = False) -> None:
+        """`prune_expired` drops expired entries whenever a new value is stored, for caches
+        holding large values (candle collections) that must not outlive their TTL."""
         self._clock = clock
+        self._prune = prune_expired
         self._values: dict[Hashable, tuple[float, float, Any]] = {}
         self._locks: dict[Hashable, asyncio.Lock] = {}
 
@@ -52,5 +55,8 @@ class AsyncTTLCache:
                 return entry[2]
             value = await loader()
             now = self._clock()
+            if self._prune:
+                for stale in [k for k, (_, expires, _) in self._values.items() if expires <= now]:
+                    del self._values[stale]
             self._values[key] = (now, now + ttl_seconds, value)
             return value

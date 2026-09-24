@@ -12,8 +12,15 @@ from app.core.enums import (
     CrossCheckStatus,
     DataState,
     GateStage,
+    MarketRegimeLabel,
     ProcessingState,
     ProviderStatus,
+    RegimeLabel,
+    RiskSeverity,
+    SignalLabel,
+    StructureTrend,
+    TrendDirection,
+    VolatilityLevel,
 )
 
 
@@ -370,3 +377,270 @@ class CandlesOut(_Model):
     candles: list[CandleOut]
     forming: CandleOut | None
     validation: TimeframeValidationOut
+
+
+# ---------------------------------------------------------------------- Phase 2: analysis and signals
+
+DISCLAIMER = (
+    "Deterministic quantitative analysis of public market data. Not financial advice and no promise "
+    "of accuracy or profit. Spot only: you decide and place every trade yourself."
+)
+
+
+class PipelineStageOut(_Model):
+    stage: str
+    passed: bool
+    outcome: str = Field(description="PASS, CAP (at most WATCH), DOWNGRADE (at most BUY) or BLOCK (NO TRADE)")
+    reasons: list[str]
+
+
+class FactorOut(_Model):
+    key: str
+    name: str
+    score: float
+    max_score: float
+    positives: list[str]
+    negatives: list[str]
+
+
+class RiskCheckOut(_Model):
+    key: str
+    name: str
+    passed: bool
+    severity: RiskSeverity = Field(description="effect when failed: block, cap or downgrade")
+    detail: str
+
+
+class TargetOut(_Model):
+    price: float
+    r_multiple: float
+    basis: str
+    allocation_pct: float
+    projected: bool
+
+
+class TradePlanOut(_Model):
+    quote_asset: str
+    price: float
+    entry_low: float
+    entry_high: float
+    entry_reference: float
+    stop_loss: float
+    stop_basis: str
+    stop_distance_pct: float
+    risk_per_unit: float
+    targets: list[TargetOut]
+    reward_risk: float = Field(description="net of fees and slippage, at TP2 (main target)")
+    reward_risk_tp1: float
+    gross_reward_risk: float
+    cost_pct: float = Field(description="round-trip fees and slippage, percent of the position")
+    nearest_resistance: float | None
+    room_to_resistance_r: float | None
+    suggested_allocation_pct: float = Field(description="portfolio share risking the per-signal limit at the stop")
+    risk_at_allocation_pct: float
+    better_entry_below: float | None
+    invalidation: str
+    actionable: bool = Field(description="true only for BUY and STRONG BUY; a WATCH plan is not a buy signal")
+    notes: list[str]
+
+
+class IndicatorSetOut(_Model):
+    timeframe: str
+    label: str
+    candles: int
+    open_time: datetime
+    close: float
+    ema20: float | None
+    ema50: float | None
+    ema200: float | None
+    ema20_slope_pct: float | None
+    ema50_slope_pct: float | None
+    rsi14: float | None
+    macd: float | None
+    macd_signal: float | None
+    macd_hist: float | None
+    atr14: float | None
+    atr_pct: float | None
+    atr_pct_percentile: float | None
+    bb_upper: float | None
+    bb_middle: float | None
+    bb_lower: float | None
+    bb_pct_b: float | None
+    bb_width_pct: float | None
+    adx14: float | None
+    plus_di: float | None
+    minus_di: float | None
+    obv_slope: float | None
+    volume_ratio: float | None
+    up_down_volume_ratio: float | None
+    roc10: float | None
+    roc20: float | None
+    realized_vol_pct: float | None
+
+
+class PivotOut(_Model):
+    time: datetime
+    price: float
+
+
+class StructureBreakOut(_Model):
+    direction: str
+    level: float
+    time: datetime
+    candles_ago: int
+
+
+class LevelOut(_Model):
+    price: float
+    touches: int
+    last_touch: datetime
+    distance_pct: float
+    distance_atr: float | None
+
+
+class StructureOut(_Model):
+    timeframe: str
+    label: str
+    trend: StructureTrend
+    reason: str
+    last_swing_high: PivotOut | None
+    last_swing_low: PivotOut | None
+    last_break: StructureBreakOut | None
+    supports: list[LevelOut]
+    resistances: list[LevelOut]
+
+
+class TimeframeRegimeOut(_Model):
+    timeframe: str
+    label: str
+    trend: TrendDirection
+    regime: RegimeLabel
+    adx: float | None
+    strength: str
+    volatility: VolatilityLevel
+    atr_pct_percentile: float | None
+    reasons: list[str]
+
+
+class MarketRegimeOut(_Model):
+    computed_at: datetime
+    regime: MarketRegimeLabel
+    max_signal: SignalLabel
+    btc_trend: TrendDirection | None
+    btc_close: float | None
+    btc_ema50: float | None
+    btc_ema200: float | None
+    btc_vs_ema200_pct: float | None
+    btc_roc20: float | None
+    btc_atr_pct: float | None
+    volatility: VolatilityLevel
+    breadth_pct: float | None
+    breadth_sample: int
+    fear_greed: FearGreedOut | None
+    global_metrics: GlobalMetricsOut | None
+    flags: list[str]
+    reasons: list[str]
+    errors: list[str]
+
+
+class AnalysisOut(_Model):
+    generated_at: datetime
+    symbol: str
+    name: str
+    universe_rank: int
+    engine_version: str
+    feature_version: str
+    strategy: str
+    setup_timeframe: str
+    signal: SignalLabel
+    score: int = Field(description="0-100 ranking of the setup; not a probability")
+    score_label: SignalLabel = Field(description="label from the score alone, before risk and data checks")
+    summary: str
+    trend: str
+    price: float | None
+    quote_asset: str | None
+    market_source: str | None
+    data_state: DataState
+    data_health_score: int
+    integrity_passed: bool
+    pipeline: list[PipelineStageOut]
+    factors: list[FactorOut]
+    plan: TradePlanOut | None
+    risk_checks: list[RiskCheckOut]
+    reasons: list[str]
+    risks: list[str]
+    indicators: list[IndicatorSetOut]
+    structure: list[StructureOut]
+    regimes: list[TimeframeRegimeOut]
+    market_regime: MarketRegimeOut
+    persistence: str
+    disclaimer: str = DISCLAIMER
+
+
+class SignalSummaryOut(_Model):
+    symbol: str
+    name: str
+    universe_rank: int
+    signal: SignalLabel
+    score: int
+    trend: str
+    price: float | None
+    quote_asset: str | None
+    market_source: str | None
+    data_state: DataState
+    entry_low: float | None
+    entry_high: float | None
+    stop_loss: float | None
+    take_profit_1: float | None
+    take_profit_2: float | None
+    reward_risk: float | None
+    suggested_allocation_pct: float | None
+    summary: str
+    reasons: list[str]
+
+
+class SignalScanOut(_Model):
+    generated_at: datetime
+    engine_version: str
+    strategy: str
+    market_regime: MarketRegimeOut
+    counts: dict[str, int]
+    signals: list[SignalSummaryOut]
+    errors: list[str]
+    disclaimer: str = DISCLAIMER
+
+
+class StoredTargetOut(_Model):
+    kind: str
+    level_index: int
+    price: float
+    allocation_pct: float | None
+
+
+class StoredSignalOut(_Model):
+    id: int
+    created_at: datetime
+    symbol: str
+    timeframe: str
+    strategy: str
+    signal: str
+    signal_score: int
+    data_state: str
+    data_health_score: int
+    entry_low: float | None
+    entry_high: float | None
+    stop_loss: float | None
+    risk_reward: float | None
+    trend: str | None
+    market_regime: str | None
+    summary: str | None
+    status: str
+    engine_version: str | None
+    targets: list[StoredTargetOut]
+
+
+class SignalHistoryOut(_Model):
+    generated_at: datetime
+    symbol: str | None
+    persistence: str
+    signals: list[StoredSignalOut]
