@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Crypto Signal Dashboard</title>
+  <meta name="description" content="Top 20 spot market overview with data-integrity checks and provider health.">
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/static/dashboard.css?v=__VERSION__">
+  <script src="/static/dashboard.js?v=__VERSION__" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <h1>Crypto Market Analysis</h1>
+      <span class="muted small">v__VERSION__</span>
+    </div>
+    <div class="topbar-status">
+      <span id="overall-state" aria-live="polite"></span>
+      <span id="updated" class="muted small"></span>
+      <button id="refresh" type="button">Refresh</button>
+      <button id="theme" type="button" aria-label="Switch color theme">Theme</button>
+    </div>
+  </header>
+
+  <main>
+    <p class="notice">
+      Phase 1: market data and fail-safe checks only. Spot only, no trade execution.
+      Buy/Watch signals start in Phase 2. Nothing here is financial advice.
+    </p>
+
+    <div id="error" class="alert" role="alert" hidden></div>
+
+    <section aria-label="Market context">
+      <div id="tiles" class="tiles"></div>
+    </section>
+
+    <div id="state-reasons" class="alert warn" hidden></div>
+
+    <section class="card" aria-labelledby="market-title">
+      <div class="card-head">
+        <h2 id="market-title">Top 20 universe</h2>
+        <span id="universe-meta" class="muted small"></span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th class="num hide-sm">#</th>
+              <th>Asset</th>
+              <th class="num">Price</th>
+              <th class="num">24h</th>
+              <th class="num hide-sm">Volume 24h</th>
+              <th class="num hide-sm">Market cap</th>
+              <th class="hide-sm">Market</th>
+              <th class="hide-sm">Price check</th>
+              <th>Data state</th>
+              <th class="num hide-sm">Score</th>
+            </tr>
+          </thead>
+          <tbody id="market-rows">
+            <tr><td colspan="10" class="empty">Loading market data…</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="card-foot small">
+        <span class="muted">Select an asset to see its full integrity gate.</span>
+        <details id="excluded" hidden>
+          <summary></summary>
+          <ul></ul>
+        </details>
+      </div>
+    </section>
+
+    <section class="card" aria-labelledby="providers-title">
+      <div class="card-head">
+        <h2 id="providers-title">Provider health</h2>
+        <span id="stream-meta" class="muted small"></span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Provider</th>
+              <th class="hide-sm">Role</th>
+              <th>Status</th>
+              <th class="hide-sm">Circuit</th>
+              <th class="num hide-sm">Avg latency</th>
+              <th class="num hide-sm">Requests</th>
+              <th class="num hide-sm">Failures</th>
+              <th class="num hide-sm">Rate limits</th>
+              <th>Last success</th>
+              <th class="hide-sm">Last error</th>
+            </tr>
+          </thead>
+          <tbody id="provider-rows">
+            <tr><td colspan="10" class="empty">Loading provider health…</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div id="provider-notes" class="card-foot small" hidden></div>
+    </section>
+  </main>
+
+  <footer class="small">
+    <a href="/api/docs">API docs</a>
+    <a href="/api">API index</a>
+    <a href="/health">Health</a>
+    <span>Updates every 30 seconds while this tab is visible.</span>
+  </footer>
+
+  <dialog id="detail" aria-labelledby="detail-title">
+    <div class="detail-head">
+      <h2 id="detail-title">Asset</h2>
+      <button id="detail-close" type="button">Close</button>
+    </div>
+    <div id="detail-body" class="detail-body"></div>
+  </dialog>
+</body>
+</html>

@@ -7,10 +7,12 @@ import contextlib
 import logging
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.api.routes import router
 from app.config import Settings, get_settings
@@ -22,6 +24,14 @@ from app.services.listing import ListingUnavailable
 from app.services.spot_router import NoMarketData
 
 log = logging.getLogger("app")
+
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+
+# The dashboard page loads only its own script and stylesheet and calls only this API.
+DASHBOARD_CSP = (
+    "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
+    "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+)
 
 
 def create_app(
@@ -113,17 +123,29 @@ def create_app(
             status_code=503, content={"detail": exc.message, "provider": exc.provider, "data_state": "API_FAILURE"}
         )
 
-    @app.get("/", include_in_schema=False)
-    async def root() -> dict[str, object]:
+    # Phase 1 status dashboard (static HTML + JS over the JSON API). Phase 3 replaces it with the React UI.
+    dashboard_html = (STATIC_DIR / "index.html").read_text(encoding="utf-8").replace("__VERSION__", settings.app_version)
+
+    @app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
+    async def dashboard() -> HTMLResponse:
+        return HTMLResponse(
+            dashboard_html,
+            headers={"Content-Security-Policy": DASHBOARD_CSP, "Cache-Control": "no-cache"},
+        )
+
+    @app.get("/api", include_in_schema=False)
+    async def api_index() -> dict[str, object]:
         return {
             "service": settings.app_name,
             "version": settings.app_version,
+            "dashboard": "/",
             "health": "/health",
             "docs": "/api/docs",
             "endpoints": ["/api/market", "/api/assets", "/api/assets/{symbol}", "/api/provider-health"],
         }
 
     app.include_router(router)
+    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
     return app
 
 

@@ -123,6 +123,8 @@ consistency 25% and provider health 15%. It is informational; the gate decision 
 
 | Endpoint | Description |
 |---|---|
+| `GET /` | Status dashboard (see below) |
+| `GET /api` | JSON index of the API |
 | `GET /health` | Liveness, database check, processing state. Never calls external providers. |
 | `GET /api/system/state` | Processing state and aggregate data state with reasons |
 | `GET /api/market` | Top 20 with live prices, per-asset state and score, market context |
@@ -133,6 +135,19 @@ consistency 25% and provider health 15%. It is informational; the gate decision 
 
 Interactive docs: `/api/docs`. Expensive endpoints are cached with single-flight loading, so
 many open tabs never multiply provider calls.
+
+## Status dashboard (Phase 1)
+
+Opening the service URL shows a read-only status page built on the API above: market context
+(total market cap, BTC dominance, Fear & Greed, Altcoin Season), the Top 20 with live price,
+24h change, price cross-check and data state, and provider health including CoinMarketCap
+credit usage. Selecting an asset loads `/api/assets/{symbol}` and shows every integrity-gate
+stage, candle completeness per timeframe, order book and volatility.
+
+It is plain HTML, CSS and JavaScript in `backend/app/static` with no build step and no
+third-party scripts (strict Content-Security-Policy). It refreshes every 30 seconds only while
+the tab is visible, so a background tab spends no provider calls or credits. It shows no
+trading signals; the React dashboard in Phase 3 replaces it.
 
 ## Deploy on Railway
 
@@ -147,7 +162,8 @@ many open tabs never multiply provider calls.
 4. **Region:** Binance answers HTTP 451 from restricted locations, including the United States.
    Choose a non-US region in the service settings. If Binance is still restricted, the app
    automatically uses Kraken and labels the source; check `/api/provider-health` after deploy.
-5. Under **Networking**, generate a public domain and open it. `/health` must return 200.
+5. Under **Networking**, generate a public domain and open it: the status dashboard loads.
+   `/health` must return 200.
 6. Open `/api/provider-health`: the `coinmarketcap` entry should show `"mode": "pro"` and your
    plan's credit limit. `"pro_disabled"` means the key was rejected (the reason is shown).
 
@@ -203,6 +219,7 @@ backend/
                          listings, health score, gate
       health.py, http.py provider health registry, resilient HTTP client
     services/            universe, listing, spot router, market, assets, context, persistence
+    static/              Phase 1 status dashboard (HTML, CSS, JS; no build step)
     models/              20 SQLAlchemy tables
     schemas/             API response models
   migrations/            Alembic

@@ -136,6 +136,27 @@ async def test_provider_health_endpoint(client):
     assert "providers" in r and r["live_stream"]["running"] is False
 
 
+async def test_dashboard_page_and_assets(client):
+    http, _ = client
+    r = await http.get("/")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/html")
+    assert "script-src 'self'" in r.headers["content-security-policy"]
+    assert "__VERSION__" not in r.text
+    assert "/static/dashboard.js?v=" in r.text and "/static/dashboard.css?v=" in r.text
+    assert (await http.head("/")).status_code == 200
+    js = await http.get("/static/dashboard.js")
+    assert js.status_code == 200 and "/api/market" in js.text
+    assert (await http.get("/static/dashboard.css")).status_code == 200
+    assert (await http.get("/static/missing.js")).status_code == 404
+
+
+async def test_api_index(client):
+    http, _ = client
+    body = (await http.get("/api")).json()
+    assert body["dashboard"] == "/" and body["health"] == "/health" and "/api/market" in body["endpoints"]
+
+
 async def test_all_exchanges_down_returns_explicit_api_failure(sqlite_env):
     settings, engine = sqlite_env
     app, _ = await _make_client(settings, engine, spot=[FakeSpotAdapter("a", fail=True)])
