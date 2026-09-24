@@ -42,7 +42,9 @@ MAX_WHALES = 40
 
 
 class SourceError(Exception):
-    pass
+    def __init__(self, message: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 async def fetch_json(
@@ -53,20 +55,21 @@ async def fetch_json(
     url: str,
     params: dict[str, Any] | None = None,
     timeout: float = 12.0,
+    headers: dict[str, str] | None = None,
 ) -> Any:
-    """GET JSON from a public source and record its health. Never includes the URL in errors."""
+    """GET JSON from a public source and record its health. Never includes the URL or keys in errors."""
     health.register(provider, role)
     started = time.monotonic()
     try:
         response = await http.get(url, params=params, timeout=timeout, follow_redirects=True,
-                                  headers={"Accept": "application/json"})
+                                  headers={"Accept": "application/json", **(headers or {})})
     except httpx.HTTPError as exc:
         health.record_failure(provider, f"transport error: {type(exc).__name__}")
         raise SourceError(f"{provider}: unreachable ({type(exc).__name__})") from None
     if response.status_code >= 400:
         status = ProviderStatus.RESTRICTED if response.status_code in (401, 403, 451) else None
         health.record_failure(provider, f"HTTP {response.status_code}", status=status)
-        raise SourceError(f"{provider}: HTTP {response.status_code}")
+        raise SourceError(f"{provider}: HTTP {response.status_code}", response.status_code)
     try:
         data = response.json()
     except ValueError:

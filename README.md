@@ -48,6 +48,17 @@ the final deterministic validation.
 
 `OPENAI_API_KEY` is the only required credential. `CMC_API_KEY` is optional; see below.
 
+**CoinGecko key (optional):** set `COINGECKO_API_KEY` to your free Demo key
+(coingecko.com/en/developers/dashboard). It is sent as the `x-cg-demo-api-key` header to
+`https://api.coingecko.com/api/v3`, which raises the rate limit to about 30 calls a minute for the
+listing and market-cap fallback and for trending coins. For a paid key also set
+`COINGECKO_PLAN=pro` (uses `pro-api.coingecko.com` and `x-cg-pro-api-key`).
+
+**CoinPaprika** uses its free plan, `https://api.coinpaprika.com/v1`, with no key. Its `/tickers`
+answer lists every coin (several MB), so it gets `COINPAPRIKA_TIMEOUT_SECONDS` (30) instead of the
+default 10 seconds, which is what made it time out before. It is only called when CoinMarketCap
+and CoinGecko both fail.
+
 ## CoinMarketCap API key
 
 If an endpoint is not in your plan (error 1006, for example OHLCV history on lower plans), the app
@@ -216,6 +227,12 @@ are spent while you are not using the dashboard.
 * **Refresh data** reloads market data once; the **Auto-refresh** checkbox (off by default)
   reloads it every 30 seconds.
 * `GET /api/signals` only returns the latest completed scan; it never starts one.
+* **Coins to analyse** (under the control bar): pick exactly which coins a scan covers, for
+  example just five (Top 5 / Top 10 / Select all / Clear, or click coins), then Save selection.
+  Analyze now, Auto-analyze and live prices then use only those coins, which saves provider
+  calls. The market table still lists every coin (unselected ones are dimmed). Coins you add
+  to the watchlist join the selection. Stored in `app_settings` (migration 0003);
+  `GET/PUT /api/control/selection`.
 
 **Watchlist:** add any coin by symbol. It joins the next scan (marked "watchlist") with the full
 pipeline. It is priced from the 200-coin listing (still one CoinMarketCap credit), or from
@@ -250,7 +267,21 @@ explains and discusses but cannot turn a NO TRADE or WATCH into a buy. Models:
 (default `gpt-4o-mini`) if the first is unavailable. Rate limited to
 `CHAT_RATE_LIMIT_PER_MINUTE` (10).
 
-**News** (`GET /api/news`, cached 15 minutes, fetched only when the page opens or you refresh):
+**Model picker:** the chat card has a model list (`CHAT_MODEL_OPTIONS`; models your key cannot
+use are greyed out, checked with OpenAI's model list) and a reasoning-effort setting for GPT-5
+and o-series models. Your choice is remembered in the browser. The reply shows which model
+answered.
+
+*Fix for "The model returned no text":* GPT-5 models reason before they answer, and the
+reasoning counts against the output limit. The old limit (1500 tokens) was often used up by
+reasoning alone, leaving an empty answer. Reasoning models now get
+`CHAT_REASONING_BUDGET_TOKENS` (6000) on top of `CHAT_MAX_OUTPUT_TOKENS` and
+`CHAT_REASONING_EFFORT=low` by default; if a model still returns nothing, the next model
+answers instead and the reply says so.
+
+**News** (`GET /api/news`, cached 15 minutes, fetched only when you press Load/Refresh, or on page
+open if you tick "Load when the page opens"; nothing runs in the background, and sentiment and
+the chat only read headlines already loaded):
 RSS from CoinDesk, Cointelegraph, Decrypt and Bitcoin Magazine, CryptoCompare's free news API
 and CoinGecko trending coins, with no keys needed. Headlines are de-duplicated, tagged with the
 coins they mention, given a keyword-based tone (labelled as such) and stored in the `news` table.
@@ -294,6 +325,26 @@ once a minute), so each scan carries current notes. Forced refreshes within
 `MIN_REFRESH_SECONDS` (60) of the last fetch are served from the cache to protect the free
 sources.
 
+## Token unlocks and airdrops
+
+`GET /api/events/unlocks` and `GET /api/events/airdrops`, shown in the "Token unlocks &
+airdrops" card (loaded when you press Load, cached `EVENTS_CACHE_SECONDS`, 6 hours).
+
+* **Token unlocks** (Mobula, `MOBULA_API_KEY`; free key at mobula.io): each analysed coin's
+  release schedule, with the next unlock date, tokens, USD value, share of circulating supply
+  and who receives them. Unlocks of `UNLOCK_NOTE_MIN_PCT` (1%) of circulating supply or more
+  within `UNLOCK_NOTE_DAYS` (14) are added to that coin's signal risks ("token unlock in N
+  days..."). Like sentiment, this never changes a label or score. With a key, each scan
+  refreshes unlocks at most once per cache period.
+* **Airdrops** (AlphaDrops Developer API, `ALPHADROPS_API_KEY`, a paid subscription): active,
+  claimable and upcoming airdrops with chains, estimated reward and end date. They are
+  unverified third-party listings.
+* **Tokenomist** has no free API, so it is not integrated.
+
+Without a key, the card says which variable to set. The Mobula and AlphaDrops response formats
+were implemented from their published docs and read defensively; check the card once after
+adding a key.
+
 ## Security
 
 Set `ADMIN_TOKEN` on Railway. Then Analyze now, Stop, Auto-analyze, live prices, watchlist
@@ -322,7 +373,11 @@ Without `ADMIN_TOKEN`, anyone who finds the URL can use those controls.
 | `GET /api/news?refresh=true` | Headlines, tone, trending coins from free sources |
 | `GET /api/sentiment?refresh=true` | Phase 5: market mood, components, per-coin sentiment and notes |
 | `GET /api/onchain?refresh=true` | Phase 5: BTC/ETH network state, stablecoin supply, large transfers, exchange flows |
-| `POST /api/chat` | AI assistant (token) |
+| `GET /api/control/selection`, `PUT` (token) | Coins a scan analyses: all, or your selection |
+| `GET /api/events/unlocks?refresh=true` | Upcoming token unlocks for the analysed coins (Mobula key) |
+| `GET /api/events/airdrops?refresh=true` | Airdrops (AlphaDrops key) |
+| `GET /api/chat/models` | Chat model choices and which ones your OpenAI key can use (token) |
+| `POST /api/chat` | AI assistant (token); optional `model` and `reasoning_effort` |
 | `GET /api/portfolio`, `PUT /cash`, `POST/DELETE /positions`, `PUT /risk`, `POST /plan` | Portfolio, risk settings, trade plan (token) |
 | `GET /api/assets/{symbol}/analysis` | Phase 2: indicators, structure, regimes, score factors, trade plan, risk checks, full pipeline |
 | `GET /api/market/regime` | Phase 2: market regime and the signal cap it applies |
@@ -393,6 +448,12 @@ Portfolio > Risk settings, which are stored in the database and take precedence.
 | `SENTIMENT_CACHE_SECONDS` / `ONCHAIN_CACHE_SECONDS` | 600 / 600 | Phase 5 cadence |
 | `WHALE_MIN_BTC` / `WHALE_MIN_ETH` | 100 / 1000 | smallest transfer listed as a whale |
 | `WHALE_ALERT_API_KEY` / `WHALE_ALERT_MIN_USD` | unset / 1000000 | optional Whale Alert source |
+| `COINGECKO_API_KEY` / `COINGECKO_PLAN` | unset / demo | CoinGecko Demo (free) or Pro key |
+| `COINPAPRIKA_TIMEOUT_SECONDS` | 30 | timeout for the large CoinPaprika free-plan download |
+| `CHAT_REASONING_EFFORT` / `CHAT_REASONING_BUDGET_TOKENS` | low / 6000 | GPT-5 / o-series reasoning |
+| `CHAT_MODEL_OPTIONS` | gpt-5-mini, gpt-5, gpt-5-nano, gpt-4.1, gpt-4.1-mini, gpt-4o, gpt-4o-mini, o4-mini | models in the chat picker |
+| `MOBULA_API_KEY` / `ALPHADROPS_API_KEY` | unset | token unlocks / airdrops |
+| `EVENTS_CACHE_SECONDS` / `UNLOCK_WINDOW_DAYS` | 21600 / 30 | unlock and airdrop cadence, unlock window |
 | `REGIME_CACHE_SECONDS` | 600 | market regime refresh |
 | `CANDLE_FETCH_LIMIT` / `CANDLE_FETCH_LIMIT_LONG` | 500 / 1000 | candles per request (5m-1H / 4H-1D) |
 | `SIGNAL_PERSIST_ENABLED` / `FEATURE_PERSIST_TIMEFRAMES` | true / 1h,4h,1d | history storage |
@@ -471,5 +532,6 @@ Dockerfile, railway.json, .env.example
 
 Phase 3/4 services: `control.py` (manual scans, schedule, live prices), `watchlist.py`,
 `news.py`, `chat.py` and `assistant.py` (OpenAI chat and its context), `portfolio.py`;
-Phase 5: `onchain.py` (network data, whales, stablecoins) and `sentiment.py` (market mood);
+Phase 5: `onchain.py` (network data, whales, stablecoins), `sentiment.py` (market mood),
+`events.py` (token unlocks, airdrops), `selection.py` (coins to analyse);
 routes in `api/controls.py`.

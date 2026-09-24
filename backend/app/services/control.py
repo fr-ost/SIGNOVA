@@ -50,7 +50,9 @@ class AnalysisController:
         live_prices: Any,
         *,
         auto_minutes: int = 0,
+        selection: Any = None,
     ) -> None:
+        self._selection = selection
         self._analysis = analysis
         self._universe = universe
         self._state = state
@@ -157,7 +159,8 @@ class AnalysisController:
             raise RuntimeError("live stream unavailable")
         universe = await self._universe.get()
         symbols: dict[str, str] = {}
-        for asset in universe.assets:
+        assets = self._selection.filter(universe.assets) if self._selection is not None else universe.assets
+        for asset in assets:
             ref = next((m for m in asset.markets if m.adapter == "binance"), None)
             if ref is not None:
                 symbols[ref.symbol] = asset.symbol
@@ -211,6 +214,7 @@ class AnalysisController:
             "last_scan_at": self.last_scan.generated_at if self.last_scan else None,
             "auto_minutes": self.auto_minutes,
             "next_auto_at": self._next_auto_at,
+            "selection": self._selection.status() if self._selection is not None else {"mode": "all", "symbols": []},
             "live": {
                 "running": self.live_running,
                 "symbols": len(self._live_symbols) if self.live_running else 0,

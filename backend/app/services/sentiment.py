@@ -4,7 +4,8 @@ Market mood combines three transparent components, each scaled to -1 (fear) .. +
 * Fear & Greed index (alternative.me, 30-day history for the trend), weight 0.5
 * Perpetual funding across the universe (Binance futures, public), weight 0.2. Funding
   above the 0.01%/8h baseline means traders pay to stay long.
-* News tone of the last 48 hours (keyword method, see news.py), weight 0.3
+* News tone of the last 48 hours (keyword method, see news.py), weight 0.3. News is fetched
+  only when the user loads it; sentiment reads whatever headlines are cached.
 
 Per coin: news tone, funding rate and labelled exchange flows from on-chain data.
 
@@ -175,6 +176,8 @@ class SentimentService:
 
     async def digest(self, *, force: bool = False) -> SentimentDigest:
         entry = self._cache.peek("sentiment")
+        if entry is not None and "news" not in entry[0].components and self._news.cached() is not None:
+            force = True  # headlines were loaded since: include their tone
         if force and entry is not None and entry[1] < self._s.min_refresh_seconds:
             force = False
         return await self._cache.get_or_load("sentiment", lambda: self._load(force), self._s.sentiment_cache_seconds, force=force)
@@ -184,11 +187,12 @@ class SentimentService:
         futures = {f"{s}USDT": s for s in symbols}
         fng_job = fetch_json(self._http, self._health, "alternative_me", "sentiment", f"{self._s.alternative_me_base_url.rstrip('/')}/fng/", {"limit": 30})
         funding_job = fetch_json(self._http, self._health, "binance_futures", "sentiment", f"{self._s.binance_futures_url.rstrip('/')}/fapi/v1/premiumIndex")
-        fng_raw, funding_raw, news, onchain = await asyncio.gather(
-            fng_job, funding_job, self._news.digest(force=force), self._onchain.digest(force=force), return_exceptions=True
+        fng_raw, funding_raw, onchain = await asyncio.gather(
+            fng_job, funding_job, self._onchain.digest(force=force), return_exceptions=True
         )
+        news: NewsDigest | BaseException | None = self._news.cached()  # news loads only on request
         errors = [str(x) if isinstance(x, SourceError) else f"{type(x).__name__}: {x}"
-                  for x in (fng_raw, funding_raw, news, onchain) if isinstance(x, BaseException)]
+                  for x in (fng_raw, funding_raw, onchain) if isinstance(x, BaseException)]
         news_d: NewsDigest | None = None if isinstance(news, BaseException) else news
         chain: OnChainDigest | None = None if isinstance(onchain, BaseException) else onchain
         now = utcnow()
@@ -216,6 +220,8 @@ class SentimentService:
             components["news"] = {"source": "headlines (keyword tone)", "headlines_48h": len(recent),
                                   "positive": pos, "negative": neg, "score": market_tone}
             reasons.append(f"{len(recent)} headlines in 48h: {pos} positive, {neg} negative")
+        elif news_d is None:
+            reasons.append("news not loaded: press Load in the news card to include headline tone")
         if chain and chain.stablecoins.get("change_7d_pct") is not None:
             change = chain.stablecoins["change_7d_pct"]
             components["stablecoins"] = {"source": "defillama", "change_7d_pct": change,

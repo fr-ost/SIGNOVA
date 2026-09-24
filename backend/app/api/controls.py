@@ -20,6 +20,7 @@ from app.schemas.api import SignalScanOut
 from app.services.chat import ChatUnavailable
 from app.services.container import Container
 from app.services.portfolio import PortfolioError
+from app.services.selection import SelectionError
 from app.services.watchlist import WatchlistError
 
 router = APIRouter()
@@ -76,6 +77,29 @@ async def stop_all(c: ContainerDep, _: Admin) -> dict[str, Any]:
     return c.controller.status()
 
 
+class SelectionIn(BaseModel):
+    mode: str = Field(pattern=r"^(all|selected)$")
+    symbols: list[str] = Field(default_factory=list, max_length=60)
+
+
+@router.get("/api/control/selection", tags=["control"])
+async def get_selection(c: ContainerDep) -> dict[str, Any]:
+    """Which coins Analyze now scans: every coin, or the user's selection."""
+    last = c.universe.last
+    universe = [{"symbol": a.symbol, "name": a.name, "rank": a.universe_rank, "watchlist": a.watchlist,
+                 "supported": a.supported, "selected": c.selection.includes(a.symbol)} for a in last.assets] if last else []
+    return {**c.selection.status(), "universe": universe}
+
+
+@router.put("/api/control/selection", tags=["control"])
+async def set_selection(body: SelectionIn, c: ContainerDep, _: Admin) -> dict[str, Any]:
+    try:
+        await c.selection.set(body.mode, body.symbols)
+    except (SelectionError, WatchlistError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    return await get_selection(c)
+
+
 @router.post("/api/control/live/start", tags=["control"])
 async def live_start(c: ContainerDep, _: Admin) -> dict[str, Any]:
     try:
@@ -123,6 +147,7 @@ async def add_watch(body: WatchIn, c: ContainerDep, _: Admin) -> dict[str, Any]:
         symbol = await c.watchlist.add(body.symbol, body.note)
     except WatchlistError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from None
+    await c.selection.include(symbol)
     return {"added": symbol, "items": [{"symbol": s, "note": n} for s, n in c.watchlist.items()]}
 
 
@@ -157,6 +182,21 @@ async def onchain(c: ContainerDep, refresh: bool = False) -> dict[str, Any]:
     return (await c.onchain.digest(force=refresh)).as_dict()
 
 
+# ----------------------------------------------------------------------------- token unlocks, airdrops
+
+
+@router.get("/api/events/unlocks", tags=["events"])
+async def token_unlocks(c: ContainerDep, refresh: bool = False) -> dict[str, Any]:
+    """Upcoming token unlocks for the analysed coins (Mobula; needs MOBULA_API_KEY)."""
+    return (await c.events.unlocks(force=refresh)).as_dict()
+
+
+@router.get("/api/events/airdrops", tags=["events"])
+async def airdrops(c: ContainerDep, refresh: bool = False) -> dict[str, Any]:
+    """Active, claimable and upcoming airdrops (AlphaDrops; needs ALPHADROPS_API_KEY)."""
+    return (await c.events.airdrops(force=refresh)).as_dict()
+
+
 # ----------------------------------------------------------------------------- chat
 
 
@@ -168,14 +208,26 @@ class ChatMessage(BaseModel):
 class ChatIn(BaseModel):
     messages: list[ChatMessage] = Field(min_length=1, max_length=40)
     symbol: str | None = Field(default=None, max_length=15, pattern=r"^[A-Za-z0-9]+$")
+    model: str | None = Field(default=None, max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
+    reasoning_effort: str | None = Field(default=None, pattern=r"^(minimal|low|medium|high)$")
+
+
+@router.get("/api/chat/models", tags=["chat"])
+async def chat_models(c: ContainerDep, _: Admin) -> dict[str, Any]:
+    """Model choices for the assistant, marked with what the server's OpenAI key can use."""
+    return await c.chat.available_models()
 
 
 @router.post("/api/chat", tags=["chat"])
 async def chat(body: ChatIn, c: ContainerDep, _: Admin) -> dict[str, Any]:
     try:
-        return await c.chat.reply([m.model_dump() for m in body.messages], body.symbol.upper() if body.symbol else None)
+        return await c.chat.reply(
+            [m.model_dump() for m in body.messages], body.symbol.upper() if body.symbol else None,
+            model=body.model, reasoning_effort=body.reasoning_effort,
+        )
     except ChatUnavailable as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.message) from None
+        status = 502 if exc.status_code == 204 else exc.status_code
+        raise HTTPException(status_code=status, detail=exc.message) from None
 
 
 # ----------------------------------------------------------------------------- portfolio

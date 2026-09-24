@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable
@@ -25,6 +26,8 @@ log = logging.getLogger(__name__)
 MAX_MESSAGES = 16
 MAX_MESSAGE_CHARS = 4000
 MAX_CONTEXT_CHARS = 24000
+EFFORTS = ("minimal", "low", "medium", "high")
+MODEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
 
 SYSTEM_PROMPT = """You are the analysis assistant of a crypto spot-trading dashboard.
 You help the user think through their next spot trade using the data in CONTEXT.
@@ -63,6 +66,7 @@ class ChatService:
         self._context = context
         self._clock = clock
         self._recent: deque[float] = deque()
+        self._models_cache: tuple[float, list[str] | None] | None = None
 
     @property
     def configured(self) -> bool:
@@ -88,9 +92,60 @@ class ChatService:
             raise ChatUnavailable("the last message must come from the user", 422)
         return cleaned
 
-    async def reply(self, messages: list[dict[str, str]], symbol: str | None = None) -> dict[str, Any]:
+    @staticmethod
+    def is_reasoning(model: str) -> bool:
+        """GPT-5 and o-series models think before answering; the thinking uses output tokens."""
+        m = model.lower()
+        return m.startswith("gpt-5") or bool(re.match(r"^o\d", m))
+
+    def models_for(self, preferred: str | None) -> list[str]:
+        return list(dict.fromkeys([m for m in [preferred, *self._s.chat_models] if m]))
+
+    async def available_models(self) -> dict[str, Any]:
+        """The configured options, marked with what this OpenAI key can use (cached for an hour)."""
+        options = list(dict.fromkeys([*self._s.chat_models, *self._s.chat_model_options]))
+        now = self._clock()
+        if self._models_cache is None or now - self._models_cache[0] > 3600:
+            account: list[str] | None = None
+            if self.configured and self._s.openai_api_key is not None:
+                try:
+                    response = await self._http.get(
+                        f"{self._s.openai_base_url.rstrip('/')}/models",
+                        headers={"Authorization": f"Bearer {self._s.openai_api_key.get_secret_value()}"},
+                        timeout=httpx.Timeout(15.0, connect=10.0),
+                    )
+                    if response.status_code == 200:
+                        account = sorted(str(m.get("id")) for m in response.json().get("data", []) if isinstance(m, dict))
+                except (httpx.HTTPError, ValueError, AttributeError):
+                    account = None
+            self._models_cache = (now, account)
+        account = self._models_cache[1]
+        return {
+            "default": self._s.chat_models[0],
+            "fallbacks": self._s.chat_models[1:],
+            "reasoning_effort": self._s.chat_reasoning_effort,
+            "efforts": list(EFFORTS),
+            "models": [
+                {"id": m, "reasoning": self.is_reasoning(m), "available": None if account is None else m in account}
+                for m in options
+            ],
+            "account_checked": account is not None,
+        }
+
+    async def reply(
+        self,
+        messages: list[dict[str, str]],
+        symbol: str | None = None,
+        *,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+    ) -> dict[str, Any]:
         if not self.configured or self._s.openai_api_key is None:
             raise ChatUnavailable("OPENAI_API_KEY is not set on the server")
+        if model is not None and not MODEL_PATTERN.match(model):
+            raise ChatUnavailable("invalid model name", 422)
+        if reasoning_effort is not None and reasoning_effort not in EFFORTS:
+            raise ChatUnavailable("reasoning effort must be one of " + ", ".join(EFFORTS), 422)
         conversation = self._clean(messages)
         self._rate_limit()
         context = await self._context(symbol)
@@ -101,25 +156,43 @@ class ChatService:
             *conversation,
         ]
         errors: list[str] = []
-        for model in self._s.chat_models:
+        for candidate in self.models_for(model):
             try:
-                text, usage = await self._complete(model, payload_messages)
+                text, usage = await self._complete(candidate, payload_messages, reasoning_effort)
             except ChatUnavailable as exc:
-                if exc.status_code == 404 or "model" in exc.message.lower():
-                    errors.append(f"{model}: {exc.message}")
-                    continue  # try the fallback model
+                if exc.status_code in (404, 204) or "model" in exc.message.lower():
+                    errors.append(f"{candidate}: {exc.message}")
+                    continue  # try the next model
                 raise
-            return {"reply": text, "model": model, "usage": usage, "context_symbols": context.get("symbols_in_context", [])}
+            return {
+                "reply": text, "model": candidate, "usage": usage, "fallback_from": errors or None,
+                "context_symbols": context.get("symbols_in_context", []),
+            }
         raise ChatUnavailable("; ".join(errors) or "no chat model available", 502)
 
-    async def _complete(self, model: str, messages: list[dict[str, str]]) -> tuple[str, dict[str, Any]]:
+    def _payload(self, model: str, messages: list[dict[str, str]], effort: str | None) -> dict[str, Any]:
+        payload: dict[str, Any] = {"model": model, "messages": messages}
+        if self.is_reasoning(model):
+            chosen = effort or self._s.chat_reasoning_effort
+            if chosen == "minimal" and not model.lower().startswith("gpt-5"):
+                chosen = "low"  # o-series models have no "minimal" setting
+            payload["reasoning_effort"] = chosen
+            # the budget covers hidden reasoning plus the visible answer
+            payload["max_completion_tokens"] = self._s.chat_max_output_tokens + self._s.chat_reasoning_budget_tokens
+        else:
+            payload["max_completion_tokens"] = self._s.chat_max_output_tokens
+        return payload
+
+    async def _complete(
+        self, model: str, messages: list[dict[str, str]], effort: str | None = None
+    ) -> tuple[str, dict[str, Any]]:
         assert self._s.openai_api_key is not None
         try:
             response = await self._http.post(
                 f"{self._s.openai_base_url.rstrip('/')}/chat/completions",
-                json={"model": model, "messages": messages, "max_completion_tokens": self._s.chat_max_output_tokens},
+                json=self._payload(model, messages, effort),
                 headers={"Authorization": f"Bearer {self._s.openai_api_key.get_secret_value()}"},
-                timeout=httpx.Timeout(90.0, connect=10.0),
+                timeout=httpx.Timeout(120.0, connect=10.0),
             )
         except httpx.HTTPError as exc:
             raise ChatUnavailable(f"OpenAI unreachable: {type(exc).__name__}", 502) from None
@@ -138,9 +211,18 @@ class ChatService:
                 message = f"OpenAI rate limit or quota: {message}"
             raise ChatUnavailable(str(message)[:300], status)
         try:
-            text = body["choices"][0]["message"]["content"] or ""
+            choice = body["choices"][0]
+            message_obj = choice["message"]
         except (KeyError, IndexError, TypeError):
             raise ChatUnavailable("unexpected OpenAI response", 502) from None
-        if not text.strip():
-            text = "(The model returned no text. Try again or shorten the question.)"
-        return text.strip(), body.get("usage") or {}
+        text = message_obj.get("content") or message_obj.get("refusal") or ""
+        if isinstance(text, list):  # content parts
+            text = "".join(str(p.get("text", "")) for p in text if isinstance(p, dict))
+        if not str(text).strip():
+            reason = choice.get("finish_reason")
+            detail = (
+                "the model used its whole token budget on reasoning (finish_reason=length)"
+                if reason == "length" else f"the model returned no text (finish_reason={reason})"
+            )
+            raise ChatUnavailable(detail, 204)
+        return str(text).strip(), body.get("usage") or {}

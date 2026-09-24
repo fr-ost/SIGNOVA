@@ -220,7 +220,13 @@ async def test_whale_alert_optional_source(env5):
 
 async def test_sentiment_endpoint_components_and_notes(env5):
     http, c, sessions = env5
-    body = (await http.get("/api/sentiment")).json()
+    before = (await http.get("/api/sentiment")).json()
+    assert "news" not in before["components"] and any("news not loaded" in r for r in before["reasons"])
+    assert not any("feed.example" in call for call in CALLS)  # sentiment never fetches news itself
+    await http.get("/api/news")  # the user loads news
+    stored, expires, value = c.sentiment._cache._values["sentiment"]
+    c.sentiment._cache._values["sentiment"] = (stored - 120, expires, value)  # past the min refresh interval
+    body = (await http.get("/api/sentiment")).json()  # still cached, but recomputed to include the headlines
     comps = body["components"]
     assert comps["fear_greed"]["value"] == 70 and body["trend"] == "RISING"
     assert comps["funding"]["crowded_longs"] == ["ETH"] and comps["funding"]["crowded_shorts"] == ["SOL"]
@@ -234,7 +240,7 @@ async def test_sentiment_endpoint_components_and_notes(env5):
     assert body["assets"]["BTC"]["headlines"] >= 1 and body["assets"]["BTC"]["recent_titles"]
     assert c.sentiment.for_asset("eth").symbol == "ETH"
     async with sessions() as s:
-        assert await s.scalar(select(func.count()).select_from(SentimentReading).where(SentimentReading.scope == "market")) == 1
+        assert await s.scalar(select(func.count()).select_from(SentimentReading).where(SentimentReading.scope == "market")) == 2
         assert await s.scalar(select(func.count()).select_from(SentimentReading).where(SentimentReading.scope == "asset")) >= 2
 
 

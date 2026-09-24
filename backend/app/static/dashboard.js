@@ -169,6 +169,16 @@
     }
   }
 
+  function pref(key, value) {
+    try {
+      if (value === undefined) return localStorage.getItem(key);
+      localStorage.setItem(key, value);
+    } catch {
+      /* storage unavailable: preference lasts for this page view */
+    }
+    return value ?? null;
+  }
+
   function askToken() {
     const value = window.prompt("This action needs the admin token (ADMIN_TOKEN on the server):", "");
     if (value == null) return false;
@@ -299,7 +309,8 @@
     const open = () => openDetail(row.symbol);
     return h(
       "tr",
-      { class: `clickable${row.supported ? "" : " unsupported"}`, onclick: open },
+      { class: `clickable${row.supported ? "" : " unsupported"}${selectionState && !isSelected(row.symbol) ? " deselected" : ""}`,
+        onclick: open, title: selectionState && !isSelected(row.symbol) ? "Not in your analysis selection" : null },
       h("td", { class: "num muted hide-sm", text: row.universe_rank }),
       h(
         "td",
@@ -374,6 +385,7 @@
     } else {
       excluded.hidden = true;
     }
+    loadSelection(); // the universe may have changed (no provider calls)
   }
 
   // ---------------------------------------------------------------- provider health
@@ -1023,7 +1035,8 @@
       lastScanAt = s.last_scan_at;
       refreshSignals();
       refreshPortfolio();
-      refreshMood();  // the scan refreshed sentiment; this reads the cache
+      if (moodLoaded) refreshMood();  // the scan refreshed sentiment; this reads the cache
+      if (unlocksLoaded) refreshEvents(false, true);
     }
     scheduleControl(s.scan.running ? 2000 : 30000);
     if (s.live.running && !liveTimer) liveTimer = setInterval(refreshLive, 5000);
@@ -1108,6 +1121,10 @@
 
   async function refreshNews(force = false) {
     const list = $("news-list");
+    const button = $("news-refresh");
+    button.disabled = true;
+    button.classList.add("busy");
+    if (!list.querySelector("a")) list.replaceChildren(...skeletonItems(4));
     try {
       const d = await getJSON(`/api/news${force ? "?refresh=true" : ""}`, 60000);
       const counts = d.sentiment || {};
@@ -1144,7 +1161,15 @@
       );
     } catch (err) {
       list.replaceChildren(h("li", { class: "muted small", text: `News unavailable: ${err.message}` }));
+    } finally {
+      button.disabled = false;
+      button.classList.remove("busy");
+      button.textContent = "Refresh";
     }
+  }
+
+  function skeletonItems(n) {
+    return Array.from({ length: n }, () => h("li", { class: "skeleton-row", "aria-hidden": "true" }, h("span", { class: "skeleton" }), h("span", { class: "skeleton short" })));
   }
 
   // ---------------------------------------------------------------- Phase 5: market mood, on-chain, whales
@@ -1231,12 +1256,15 @@
   }
 
   let moodLoading = false;
+  let moodLoaded = false;
 
   async function refreshMood(force = false) {
     if (moodLoading) return;
     moodLoading = true;
     const button = $("mood-refresh");
     button.disabled = true;
+    button.classList.add("busy");
+    if (!moodLoaded) $("mood-summary").replaceChildren(h("div", { class: "pad" }, ...skeletonItems(3).map((li) => h("div", { class: "skeleton-row" }, ...li.childNodes))));
     const q = force ? "?refresh=true" : "";
     // on-chain first: sentiment reuses its cached result instead of fetching twice
     const onchain = await Promise.allSettled([getJSON(`/api/onchain${q}`, 60000)]);
@@ -1262,6 +1290,9 @@
       ...(unique.length ? [h("span", { title: unique.join("\n"), text: `${unique.length} source(s) unavailable` })] : []),
     );
     button.disabled = false;
+    button.classList.remove("busy");
+    button.textContent = "Refresh";
+    moodLoaded = true;
     moodLoading = false;
   }
 
@@ -1282,6 +1313,200 @@
       s.notes.length ? plainList(s.notes, "small") : null,
       s.recent_titles.length ? h("div", { class: "card-foot small muted" }, s.recent_titles.map((t) => h("div", { text: t }))) : null,
     );
+  }
+
+  // ---------------------------------------------------------------- coins to analyse (selection)
+
+  let selectionState = null; // { mode, symbols:Set, universe:[...] }
+  let selectionDraft = null; // Set of symbols being edited
+
+  function isSelected(symbol) {
+    return !selectionState || selectionState.mode === "all" || selectionState.symbols.has(symbol);
+  }
+
+  function describeSelection() {
+    if (!selectionState) return "All coins";
+    if (selectionState.mode === "all") return `All coins (${selectionState.universe.length || "Top 20 + watchlist"})`;
+    const list = [...selectionState.symbols];
+    return `${list.length} selected: ${list.slice(0, 6).join(", ")}${list.length > 6 ? "…" : ""}`;
+  }
+
+  function renderSelection() {
+    const st = selectionState;
+    $("selection-summary").textContent = describeSelection();
+    $("selection-summary").classList.toggle("active", !!st && st.mode === "selected");
+    if (!st) return;
+    const draft = selectionDraft;
+    $("selection-count").textContent = `${draft.size} of ${st.universe.length} selected`;
+    $("selection-chips").replaceChildren(
+      ...(st.universe.length
+        ? st.universe.map((u) => h(
+            "button",
+            {
+              type: "button", class: `select-chip${u.supported ? "" : " unsupported"}`, "aria-pressed": draft.has(u.symbol) ? "true" : "false",
+              title: `${u.name}${u.watchlist ? " (watchlist)" : ""}${u.supported ? "" : " - no spot market"}`,
+              onclick: () => {
+                if (draft.has(u.symbol)) draft.delete(u.symbol); else draft.add(u.symbol);
+                renderSelection();
+              },
+            },
+            h("span", { class: "chip-rank", text: u.watchlist ? "★" : `#${u.rank}` }),
+            u.symbol,
+          ))
+        : [h("span", { class: "muted small", text: "Load market data first (Refresh data)." })]),
+    );
+  }
+
+  async function loadSelection() {
+    try {
+      const r = await getJSON("/api/control/selection");
+      selectionState = { mode: r.mode, symbols: new Set(r.symbols), universe: r.universe };
+      selectionDraft = new Set(r.universe.filter((u) => u.selected).map((u) => u.symbol));
+      if (r.mode === "selected") r.symbols.forEach((s) => selectionDraft.add(s));
+      renderSelection();
+      $("market-rows").querySelectorAll("tr").forEach((tr) => {
+        const btn = tr.querySelector(".link-button");
+        if (btn) tr.classList.toggle("deselected", !isSelected(btn.textContent.trim()));
+      });
+    } catch {
+      /* selection is optional; scans then cover every coin */
+    }
+  }
+
+  async function saveSelection() {
+    if (!selectionState) return;
+    const all = selectionState.universe.every((u) => selectionDraft.has(u.symbol));
+    const body = all ? { mode: "all", symbols: [] } : { mode: "selected", symbols: [...selectionDraft] };
+    const button = $("sel-save");
+    button.disabled = true;
+    try {
+      const r = await api("/api/control/selection", { method: "PUT", body });
+      selectionState = { mode: r.mode, symbols: new Set(r.symbols), universe: r.universe };
+      renderSelection();
+      await loadSelection();
+      button.textContent = "Saved ✓";
+      setTimeout(() => { button.textContent = "Save selection"; }, 1500);
+    } catch (err) {
+      window.alert(err.message);
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  function presetSelection(kind) {
+    if (!selectionState) return;
+    const ranked = selectionState.universe.filter((u) => !u.watchlist && u.supported);
+    if (kind === "all") selectionDraft = new Set(selectionState.universe.map((u) => u.symbol));
+    else if (kind === "none") selectionDraft = new Set();
+    else selectionDraft = new Set(ranked.slice(0, kind).map((u) => u.symbol));
+    renderSelection();
+  }
+
+  // ---------------------------------------------------------------- token unlocks, airdrops
+
+  let unlocksLoaded = false;
+  let eventsLoading = false;
+
+  function unlockItem(c) {
+    const next = c.next_unlock;
+    const pct = c.window_pct_circulating;
+    const tone = pct == null ? "neutral" : pct >= 2 ? "critical" : pct >= 1 ? "serious" : pct > 0 ? "warning" : "neutral";
+    const allocs = next ? Object.entries(next.allocations).map(([k, v]) => `${k} ${fmtNum(v)}`).join(" · ") : "";
+    return h(
+      "li",
+      {},
+      h(
+        "div",
+        { class: "whale-row" },
+        h("strong", { text: c.symbol }),
+        toneBadge(tone, pct == null ? "supply n/a" : `${pct.toFixed(2)}% of supply`),
+        h("span", { class: "muted", text: c.window_value_usd ? fmtUsd(c.window_value_usd) : "" }),
+      ),
+      next
+        ? h(
+            "div",
+            { class: "news-sub" },
+            h("span", { text: `next ${new Date(next.date).toLocaleDateString()} (in ${Math.max(0, Math.round(next.days_until))} d)` }),
+            h("span", { text: `${fmtNum(next.tokens)} tokens` }),
+            allocs ? h("span", { text: allocs }) : null,
+          )
+        : null,
+    );
+  }
+
+  function renderUnlocks(d) {
+    const panel = $("unlocks-panel");
+    if (!d.configured) {
+      panel.replaceChildren(h("p", { class: "muted small pad", text: d.message }));
+      return;
+    }
+    const soon = d.coins.filter((c) => c.window_tokens > 0);
+    const later = d.coins.filter((c) => !(c.window_tokens > 0));
+    panel.replaceChildren(...[
+      h("p", { class: "muted small pad", text: `${d.checked.length} coins checked · next ${d.window_days} days · ${fmtTime(d.fetched_at)}${d.errors.length ? ` · ${d.errors.length} not found` : ""}` }),
+      h("ul", { class: "news-list" },
+        ...(soon.length ? soon.map(unlockItem) : [h("li", { class: "muted small", text: `No unlocks in the next ${d.window_days} days for the analysed coins.` })])),
+      later.length ? h("details", { class: "whales" }, h("summary", { class: "small", text: `Later unlocks (${later.length})` }), h("ul", { class: "news-list" }, ...later.map(unlockItem))) : null,
+      h("p", { class: "muted small pad", text: "Unlocks of 1%+ of circulating supply within 14 days are added to that coin's risk notes." }),
+    ].filter(Boolean));
+  }
+
+  const DROP_TONE = { active: "good", claimable: "warning", upcoming: "neutral" };
+
+  function renderAirdrops(d) {
+    const panel = $("airdrops-panel");
+    if (!d.configured) {
+      panel.replaceChildren(h("p", { class: "muted small pad", text: d.message }));
+      return;
+    }
+    panel.replaceChildren(...[
+      h("ul", { class: "news-list" },
+        ...(d.airdrops.length
+          ? d.airdrops.map((a) => h(
+              "li",
+              {},
+              h("div", { class: "whale-row" },
+                a.url ? h("a", { href: a.url, target: "_blank", rel: "noopener noreferrer", text: a.name }) : h("strong", { text: a.name }),
+                a.status ? toneBadge(DROP_TONE[a.status.toLowerCase()] || "neutral", humanize(a.status)) : null),
+              h("div", { class: "news-sub" },
+                a.chains.length ? h("span", { text: a.chains.join(" · ") }) : null,
+                a.reward ? h("span", { text: `reward ${a.reward}` }) : null,
+                a.cost ? h("span", { text: `cost ${a.cost}` }) : null,
+                a.ends_at ? h("span", { text: `ends ${new Date(a.ends_at).toLocaleDateString()}` }) : null),
+            ))
+          : [h("li", { class: "muted small", text: "No airdrops returned." })])),
+      d.errors.length ? h("p", { class: "muted small pad", title: d.errors.join("\n"), text: `${d.errors.length} request(s) failed` }) : null,
+      h("p", { class: "muted small pad", text: "Airdrops are unverified third-party listings: never connect a wallet or pay fees you do not understand." }),
+    ].filter(Boolean));
+  }
+
+  async function refreshEvents(force = false, quiet = false) {
+    if (eventsLoading) return;
+    eventsLoading = true;
+    const button = $("events-refresh");
+    button.disabled = true;
+    button.classList.add("busy");
+    const q = force ? "?refresh=true" : "";
+    const [unlocks, drops] = await Promise.allSettled([
+      getJSON(`/api/events/unlocks${q}`, 90000), quiet ? Promise.reject(new Error("skipped")) : getJSON(`/api/events/airdrops${q}`, 60000),
+    ]);
+    if (unlocks.status === "fulfilled") renderUnlocks(unlocks.value);
+    else $("unlocks-panel").replaceChildren(h("p", { class: "muted small pad", text: `Unlocks unavailable: ${unlocks.reason.message}` }));
+    if (drops.status === "fulfilled") renderAirdrops(drops.value);
+    else if (!quiet) $("airdrops-panel").replaceChildren(h("p", { class: "muted small pad", text: `Airdrops unavailable: ${drops.reason.message}` }));
+    unlocksLoaded = true;
+    button.disabled = false;
+    button.classList.remove("busy");
+    button.textContent = "Refresh";
+    eventsLoading = false;
+  }
+
+  function selectTab(which) {
+    for (const name of ["unlocks", "airdrops"]) {
+      const on = name === which;
+      $(`tab-${name}`).setAttribute("aria-selected", on ? "true" : "false");
+      $(`${name}-panel`).hidden = !on;
+    }
   }
 
   // ---------------------------------------------------------------- chat
@@ -1315,13 +1540,51 @@
     const symbol = $("chat-symbol").value || null;
     try {
       const history = chatMessages.filter((m) => !m.error).map(({ role, content }) => ({ role, content })).slice(-16);
-      const r = await api("/api/chat", { method: "POST", body: { messages: history, symbol }, timeoutMs: 120000 });
-      chatMessages.push({ role: "assistant", content: r.reply, meta: `${r.model}${symbol ? ` · focus ${symbol}` : ""}` });
+      const model = $("chat-model").value || null;
+      const effort = $("chat-effort").value || null;
+      const r = await api("/api/chat", {
+        method: "POST", body: { messages: history, symbol, model, reasoning_effort: effort }, timeoutMs: 180000,
+      });
+      const fell = r.fallback_from && r.fallback_from.length ? ` · fallback (${r.fallback_from.join("; ")})` : "";
+      chatMessages.push({ role: "assistant", content: r.reply, meta: `${r.model}${symbol ? ` · focus ${symbol}` : ""}${fell}` });
     } catch (err) {
       chatMessages.push({ role: "assistant", content: `Chat unavailable: ${err.message}`, error: true });
     } finally {
       chatBusy = false;
       renderChat();
+    }
+  }
+
+  const DEFAULT_MODELS = ["gpt-5-mini", "gpt-4o-mini", "gpt-5", "gpt-5-nano", "gpt-4.1-mini", "gpt-4.1", "gpt-4o", "o4-mini"];
+
+  function fillModels(list, defaultId) {
+    const select = $("chat-model");
+    const saved = pref("chatModel") || "";
+    select.replaceChildren(
+      h("option", { value: "", text: `Default (${defaultId || "server"})` }),
+      ...list.map((m) => h("option", {
+        value: m.id,
+        text: `${m.id}${m.reasoning ? " · reasoning" : ""}${m.available === false ? " · not on this key" : ""}`,
+        disabled: m.available === false,
+      })),
+    );
+    if ([...select.options].some((o) => o.value === saved && !o.disabled)) select.value = saved;
+    syncEffort();
+  }
+
+  function syncEffort() {
+    const id = $("chat-model").value;
+    const reasoning = !id || /^(gpt-5|o\d)/.test(id);
+    $("chat-effort").disabled = !reasoning;
+    $("chat-effort").title = reasoning ? "Reasoning effort: lower is faster and cheaper" : "This model does not use reasoning effort";
+  }
+
+  async function loadChatModels() {
+    try {
+      const r = await getJSON("/api/chat/models");
+      fillModels(r.models, r.default);
+    } catch {
+      fillModels(DEFAULT_MODELS.map((id) => ({ id, reasoning: /^(gpt-5|o\d)/.test(id), available: null })), null);
     }
   }
 
@@ -1604,6 +1867,7 @@
       e.preventDefault();
       try {
         renderWatchlist((await api("/api/watchlist", { method: "POST", body: { symbol: $("watch-symbol").value } })).items);
+        loadSelection();
         $("watch-symbol").value = "";
       } catch (err) {
         window.alert(err.message);
@@ -1611,11 +1875,36 @@
     });
     getJSON("/api/watchlist").then((w) => renderWatchlist(w.items)).catch(() => renderWatchlist([]));
 
-    $("news-refresh").addEventListener("click", () => refreshNews(true));
-    refreshNews();
+    // News, mood and events load only when asked (or when their "Load when the page opens" box is ticked).
+    $("news-refresh").addEventListener("click", () => refreshNews($("news-refresh").textContent === "Refresh"));
+    $("news-auto").checked = pref("newsAuto") === "1";
+    $("news-auto").addEventListener("change", (e) => pref("newsAuto", e.target.checked ? "1" : "0"));
+    if ($("news-auto").checked) refreshNews();
 
-    $("mood-refresh").addEventListener("click", () => refreshMood(true));
-    refreshMood();
+    $("mood-refresh").addEventListener("click", () => refreshMood(moodLoaded));
+    $("mood-auto").checked = pref("moodAuto") === "1";
+    $("mood-auto").addEventListener("change", (e) => pref("moodAuto", e.target.checked ? "1" : "0"));
+    if ($("mood-auto").checked) refreshMood();
+
+    $("events-refresh").addEventListener("click", () => refreshEvents(unlocksLoaded));
+    $("tab-unlocks").addEventListener("click", () => selectTab("unlocks"));
+    $("tab-airdrops").addEventListener("click", () => selectTab("airdrops"));
+
+    $("sel-all").addEventListener("click", () => presetSelection("all"));
+    $("sel-none").addEventListener("click", () => presetSelection("none"));
+    $("sel-top5").addEventListener("click", () => presetSelection(5));
+    $("sel-top10").addEventListener("click", () => presetSelection(10));
+    $("sel-save").addEventListener("click", saveSelection);
+    $("selection-box").addEventListener("toggle", (e) => { if (e.target.open) loadSelection(); });
+    loadSelection();
+
+    $("chat-model").addEventListener("change", (e) => { pref("chatModel", e.target.value); syncEffort(); });
+    $("chat-effort").value = pref("chatEffort") || "";
+    $("chat-effort").addEventListener("change", (e) => pref("chatEffort", e.target.value));
+    loadChatModels();
+
+    $("year").textContent = String(new Date().getFullYear());
+    document.querySelectorAll("main .card").forEach((el, i) => el.style.setProperty("--i", String(Math.min(i, 12))));
 
     try {
       chatMessages = JSON.parse(sessionStorage.getItem("chat") || "[]");

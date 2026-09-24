@@ -53,3 +53,13 @@ class Alert(CreatedAtMixin, Base):
     details: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict, nullable=False)
     acknowledged: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     acknowledged_at: Mapped[datetime | None] = mapped_column(TZDateTime)
+
+
+class AppSetting(Base):
+    """Small user preferences that must survive restarts (e.g. which coins a scan analyses)."""
+
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False)

@@ -6,7 +6,6 @@ stored portfolio. Only an explicitly selected coin is analysed on demand.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
 
@@ -39,6 +38,7 @@ async def chat_context(
     symbol: str | None,
     sentiment: Any = None,
     onchain: Any = None,
+    events: Any = None,
 ) -> dict[str, Any]:
     ctx: dict[str, Any] = {"now_utc": utcnow().isoformat(), "watchlist": watchlist.symbols()}
     symbols: set[str] = set()
@@ -68,12 +68,7 @@ async def chat_context(
         }
         symbols.update(r.symbol for r in scan.signals)
 
-    digest = news.cached()
-    if digest is None:
-        try:
-            digest = await asyncio.wait_for(news.digest(), timeout=15)
-        except Exception as exc:  # news is optional context
-            log.info("news unavailable for chat", extra={"error": str(exc)})
+    digest = news.cached()  # news loads only when the user asks for it
     if digest is not None:
         ctx["news"] = {
             "fetched_at": digest.fetched_at.isoformat(),
@@ -102,6 +97,17 @@ async def chat_context(
                 {"symbol": w.symbol, "amount": _r(w.amount), "usd": _r(w.amount_usd), "type": w.classification,
                  "from": w.from_label, "to": w.to_label, "time": w.occurred_at.isoformat()}
                 for w in chain.whales[:10]
+            ],
+        }
+
+    unlocks = events.cached_unlocks() if events is not None else None
+    if unlocks is not None and unlocks.coins:
+        ctx["token_unlocks_next_days"] = {
+            "window_days": unlocks.window_days,
+            "coins": [
+                {"symbol": c.symbol, "pct_of_circulating": c.window_pct_circulating, "usd": _r(c.window_value_usd),
+                 "next": c.next_unlock.date.isoformat() if c.next_unlock else None}
+                for c in unlocks.coins[:10]
             ],
         }
 

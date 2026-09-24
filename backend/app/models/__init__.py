@@ -13,10 +13,11 @@ from app.models.market import (
 )
 from app.models.portfolio import Portfolio, PortfolioPosition, RiskSettings
 from app.models.signals import BacktestResult, ModelPrediction, Signal, SignalOutcome, SignalTarget
-from app.models.system import Alert, ProviderHealthRecord, SystemEvent
+from app.models.system import Alert, AppSetting, ProviderHealthRecord, SystemEvent
 
 __all__ = [
     "Alert",
+    "AppSetting",
     "Asset",
     "BacktestResult",
     "Base",
