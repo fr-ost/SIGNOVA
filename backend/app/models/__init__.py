@@ -2,7 +2,15 @@
 
 from app.models.base import Base
 from app.models.intel import NewsItem, SentimentReading, WhaleEvent
-from app.models.market import Asset, Candle, MarketRegime, MarketSnapshot, OrderbookSnapshot, TechnicalFeature
+from app.models.market import (
+    Asset,
+    Candle,
+    MarketRegime,
+    MarketSnapshot,
+    OrderbookSnapshot,
+    TechnicalFeature,
+    WatchlistItem,
+)
 from app.models.portfolio import Portfolio, PortfolioPosition, RiskSettings
 from app.models.signals import BacktestResult, ModelPrediction, Signal, SignalOutcome, SignalTarget
 from app.models.system import Alert, ProviderHealthRecord, SystemEvent
@@ -28,5 +36,6 @@ __all__ = [
     "SignalTarget",
     "SystemEvent",
     "TechnicalFeature",
+    "WatchlistItem",
     "WhaleEvent",
 ]

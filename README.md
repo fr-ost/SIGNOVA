@@ -13,11 +13,11 @@ Nothing in this project promises profitability or accuracy.
 |---|---|---|
 | 1 | Railway, PostgreSQL, provider adapters, Binance, CMC Top 20, health and fail-safe | **Done** |
 | 2 | Historical data, indicators, structure, regime, quantitative signal and risk engine | **Done** |
-| 3 | On-demand controls, dashboard UI, charts, live updates | Next |
-| 4 | Portfolio, risk, allocation, DCA, P/L scenarios | |
-| 5 | News, sentiment, whale / on-chain | |
-| 6 | Alerts | |
-| 7 | OpenAI reasoning layer | |
+| 3 | On-demand controls, dashboard UI, charts, live updates | **Done** |
+| 4 | Portfolio, risk, allocation, DCA, P/L scenarios | **Done** |
+| 5 | News, sentiment, whale / on-chain | Partly: news headlines, keyword tone, CoinGecko trending |
+| 6 | Alerts | Next |
+| 7 | OpenAI reasoning layer | Partly: AI chat assistant (read-only; cannot change signals) |
 | 8 | Signal tracking, backtesting, statistics | |
 | 9 | ML / statistical prediction | |
 
@@ -49,6 +49,9 @@ the final deterministic validation.
 `OPENAI_API_KEY` is the only required credential. `CMC_API_KEY` is optional; see below.
 
 ## CoinMarketCap API key
+
+If an endpoint is not in your plan (error 1006, for example OHLCV history on lower plans), the app
+skips it for a day and shows it as a note on the provider card, not as a provider error.
 
 Set `CMC_API_KEY` as a Railway variable (never in Git). With a key the app:
 
@@ -194,11 +197,72 @@ EMA200 is fully warmed up.
 candle closes (`signals`, `signal_targets`, including the full inputs and outputs for later
 backtesting), and the market regime at most hourly or on change (`market_regimes`).
 
-**Provider usage:** a full scan analyses the whole universe with at most 4 assets in parallel and
-is cached for 2 minutes, so any number of open dashboards triggers at most one scan per 2 minutes
-(about 350 Binance request weight of the 6,000 per-minute limit). CoinMarketCap candle
+**Provider usage:** scans run only on request. A scan analyses the universe with at most 4 coins
+in parallel (about 350 Binance request weight of the 6,000 per-minute limit). CoinMarketCap candle
 cross-checks stay cached per asset (30 minutes for 1H, 6 hours for 1D) under the credit pacing
 described above.
+
+## Manual control (Phase 3)
+
+Nothing analyses in the background by default, so no provider calls or CoinMarketCap credits
+are spent while you are not using the dashboard.
+
+* **Analyze now** scans the Top 20 plus your watchlist once. Progress shows in the control bar.
+* **Stop** cancels a running scan, switches Auto-analyze off and stops live prices.
+* **Auto-analyze** (off by default) re-scans every 15 minutes to 4 hours until you stop it.
+  `AUTO_ANALYZE_MINUTES` sets a schedule at startup (0 = off).
+* **Live prices** stream Binance mini-tickers over WebSocket (no REST calls, no credits) and update
+  prices in place until you stop them.
+* **Refresh data** reloads market data once; the **Auto-refresh** checkbox (off by default)
+  reloads it every 30 seconds.
+* `GET /api/signals` only returns the latest completed scan; it never starts one.
+
+**Watchlist:** add any coin by symbol. It joins the next scan (marked "watchlist") with the full
+pipeline. It is priced from the 200-coin listing (still one CoinMarketCap credit), or from
+CoinMarketCap quotes when it ranks lower. Stored in the `watchlist` table (migration 0002).
+
+**Charts:** the coin panel shows a candlestick chart (15m/1H/4H/1D, closed candles) with EMA20,
+EMA50, the entry zone, stop and targets, and a hover readout.
+
+## Portfolio and risk (Phase 4)
+
+Record cash and positions (spot, manual; nothing is traded). The portfolio shows value, P/L,
+allocation, total exposure and warnings (exposure above your limit, concentration), plus P/L
+scenarios per position (-20% to +20%, and the coin's signal stop and targets).
+
+**Risk settings** (max loss per trade, max position size, first-buy and DCA sizes, max total
+exposure, fees, slippage) are stored in `risk_settings` and applied to the signal engine
+immediately: every signal's suggested size and net reward:risk follow them.
+
+**Plan trade** takes a coin (and an optional budget) and returns, from its current plan: the
+risk-based budget, a three-step DCA ladder across the entry zone, average entry, loss at the stop
+as a share of equity, and P/L after costs for "stop hit", "TP1 then stop at entry",
+"TP1 + TP2" and "all targets".
+
+## AI assistant and news
+
+**AI assistant** (homepage, `POST /api/chat`): chat with an OpenAI model about the next trade.
+Each question carries the dashboard's own data as context: the latest scan and market regime,
+news headlines, your portfolio and risk settings and, if you pick a coin (or press "Ask AI about
+this coin"), its full analysis. The system prompt makes the engine authoritative: the assistant
+explains and discusses but cannot turn a NO TRADE or WATCH into a buy. Models:
+`OPENAI_ANALYSIS_MODEL` (default `gpt-5-mini`), falling back to `OPENAI_FALLBACK_MODEL`
+(default `gpt-4o-mini`) if the first is unavailable. Rate limited to
+`CHAT_RATE_LIMIT_PER_MINUTE` (10).
+
+**News** (`GET /api/news`, cached 15 minutes, fetched only when the page opens or you refresh):
+RSS from CoinDesk, Cointelegraph, Decrypt and Bitcoin Magazine, CryptoCompare's free news API
+and CoinGecko trending coins, with no keys needed. Headlines are de-duplicated, tagged with the
+coins they mention, given a keyword-based tone (labelled as such) and stored in the `news` table.
+A source that fails is listed, never guessed. News is context for you and the assistant; it is
+not an input to the signal engine.
+
+## Security
+
+Set `ADMIN_TOKEN` on Railway. Then Analyze now, Stop, Auto-analyze, live prices, watchlist
+changes, the AI chat (it spends your OpenAI credits) and the portfolio all require it. The
+dashboard asks for it once and keeps it in your browser. Public market data stays readable.
+Without `ADMIN_TOKEN`, anyone who finds the URL can use those controls.
 
 ## API
 
@@ -213,7 +277,14 @@ described above.
 | `GET /api/assets/{symbol}` | Full collection on 5 timeframes, order book, cross-check, volatility, integrity gate |
 | `GET /api/assets/{symbol}/candles?timeframe=1H&limit=300` | Validated closed candles plus the forming candle, separately |
 | `GET /api/provider-health` | Status, latency, errors, rate limits and circuit state per provider |
-| `GET /api/signals` | Phase 2: signal for every universe asset, best first, with the market regime (cached 2 minutes) |
+| `GET /api/signals` | Latest completed scan, best first (null until Analyze now has run) |
+| `GET /api/control/status` | Scan progress, schedule, live-price state, whether a token is required |
+| `POST /api/control/analyze` · `/stop` · `/auto` · `/live/start` · `/live/stop` | Manual control (token) |
+| `GET /api/live` | Latest streamed prices (no provider calls) |
+| `GET/POST /api/watchlist`, `DELETE /api/watchlist/{symbol}` | Watchlist (changes need the token) |
+| `GET /api/news?refresh=true` | Headlines, tone, trending coins from free sources |
+| `POST /api/chat` | AI assistant (token) |
+| `GET /api/portfolio`, `PUT /cash`, `POST/DELETE /positions`, `PUT /risk`, `POST /plan` | Portfolio, risk settings, trade plan (token) |
 | `GET /api/assets/{symbol}/analysis` | Phase 2: indicators, structure, regimes, score factors, trade plan, risk checks, full pipeline |
 | `GET /api/market/regime` | Phase 2: market regime and the signal cap it applies |
 | `GET /api/signals/history?symbol=BTC&limit=50` | Phase 2: stored signals with their targets, newest first |
@@ -261,6 +332,8 @@ migration: it fills tables created by the initial schema.
 ## Configuration (Phase 2)
 
 Every setting has a safe default; override any of them as a Railway variable.
+Max loss per trade, max position size, fees and slippage are then managed in the dashboard's
+Portfolio > Risk settings, which are stored in the database and take precedence.
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -273,7 +346,11 @@ Every setting has a safe default; override any of them as a Railway variable.
 | `RISK_MAX_STOP_PCT` | 15 | widest stop allowed |
 | `RISK_MAX_SPREAD_BPS` / `RISK_MIN_DEPTH_USD` / `RISK_MIN_VOLUME_24H_USD` | 30 / 25000 / 5000000 | liquidity limits |
 | `RISK_MAX_EXTENSION_ATR` / `RISK_MAX_CHANGE_24H_PCT` | 2.5 / 25 | chasing limits |
-| `SIGNAL_SCAN_CACHE_SECONDS` / `SIGNAL_SCAN_CONCURRENCY` | 120 / 4 | scan cadence and parallelism |
+| `SIGNAL_SCAN_CONCURRENCY` | 4 | coins analysed in parallel during a scan |
+| `ADMIN_TOKEN` | unset | protects controls, chat and portfolio (strongly recommended) |
+| `AUTO_ANALYZE_MINUTES` | 0 | scan schedule at startup (0 = manual only) |
+| `OPENAI_ANALYSIS_MODEL` / `OPENAI_FALLBACK_MODEL` | gpt-5-mini / gpt-4o-mini | chat models |
+| `NEWS_CACHE_SECONDS` / `NEWS_FEEDS` | 900 / four RSS feeds | news cadence and sources |
 | `REGIME_CACHE_SECONDS` | 600 | market regime refresh |
 | `CANDLE_FETCH_LIMIT` / `CANDLE_FETCH_LIMIT_LONG` | 500 / 1000 | candles per request (5m-1H / 4H-1D) |
 | `SIGNAL_PERSIST_ENABLED` / `FEATURE_PERSIST_TIMEFRAMES` | true / 1h,4h,1d | history storage |
@@ -347,4 +424,6 @@ scripts/start.sh
 Dockerfile, railway.json, .env.example
 ```
 
-Later phases add `ml/`, `ai/`, `workers/` and `frontend/`.
+Phase 3/4 services: `control.py` (manual scans, schedule, live prices), `watchlist.py`,
+`news.py`, `chat.py` and `assistant.py` (OpenAI chat and its context), `portfolio.py`;
+routes in `api/controls.py`.

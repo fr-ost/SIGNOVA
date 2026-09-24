@@ -347,6 +347,15 @@ class CoinMarketCapClient:
             priority=CRITICAL,
         )
 
+    async def quotes_latest(self, symbols: list[str]) -> Any:
+        """Latest quotes for specific symbols (watchlist coins outside the listing)."""
+        return await self.get(
+            "/v2/cryptocurrency/quotes/latest",
+            {"symbol": ",".join(sorted(set(symbols))), "convert": "USD", "skip_invalid": "true"},
+            cost=max(1, math.ceil(len(symbols) / 100)),
+            priority=NORMAL,
+        )
+
     async def global_metrics(self) -> Any:
         return await self.get("/v1/global-metrics/quotes/latest", {"convert": "USD"}, priority=NORMAL)
 

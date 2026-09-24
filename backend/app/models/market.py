@@ -131,3 +131,13 @@ class MarketRegime(CreatedAtMixin, Base):
     volatility_pct: Mapped[float | None] = mapped_column(Float)
     engine_version: Mapped[str | None] = mapped_column(String(32))
     details: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict, nullable=False)
+
+
+class WatchlistItem(CreatedAtMixin, Base):
+    """Coins the user added manually; analysed alongside the Top 20."""
+
+    __tablename__ = "watchlist"
+
+    id: Mapped[int] = mapped_column(BigIntPK, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(32), unique=True, nullable=False)
+    note: Mapped[str | None] = mapped_column(String(255))

@@ -42,6 +42,12 @@ from app.data.providers.coinpaprika import CoinPaprikaClient
 from app.data.providers.kraken import KrakenRestClient
 from app.database import create_engine_from_settings, create_session_factory
 from app.services.analysis import AnalysisService
+from app.services.assistant import chat_context, universe_names
+from app.services.chat import ChatService
+from app.services.control import AnalysisController
+from app.services.news import NewsService
+from app.services.portfolio import PortfolioService
+from app.services.watchlist import WatchlistService
 from app.services.assets import AssetService
 from app.services.context import MarketContextService
 from app.services.listing import ListingService
@@ -81,6 +87,11 @@ class Container:
     assets: AssetService
     regime: MarketRegimeService
     analysis: AnalysisService
+    watchlist: WatchlistService
+    controller: AnalysisController
+    news: NewsService
+    chat: ChatService
+    portfolio: PortfolioService
     stream: BinanceStreamManager | None = None
     live_prices: LivePriceBook = field(default_factory=LivePriceBook)
     cmc: CoinMarketCapClient | None = None
@@ -88,6 +99,9 @@ class Container:
 
     async def warmup(self) -> None:
         """Startup checks that must never block or crash the app (e.g. CMC plan detection)."""
+        await self.watchlist.load()
+        await self.portfolio.load()
+        self.controller.start_background()
         if self.cmc is not None and self.cmc.has_key:
             try:
                 await self.cmc.refresh_plan(force=True)
@@ -97,6 +111,7 @@ class Container:
                 log.info("CoinMarketCap access mode", extra={"mode": self.cmc.mode})
 
     async def aclose(self) -> None:
+        await self.controller.aclose()
         if self.stream is not None and self.stream.running:
             await self.stream.stop()
         if self.owns_http:
@@ -199,6 +214,7 @@ def build_container(
         session_factory = create_session_factory(engine)
 
     state = SystemStateStore()
+    watchlist = WatchlistService(session_factory)
     router = SpotMarketRouter(spot_adapters, health)
     listing = ListingService(
         listing_adapters,
@@ -214,7 +230,10 @@ def build_container(
         refresh_seconds=settings.universe_refresh_seconds,
         exclude_wrapped=settings.exclude_wrapped_assets,
         symbol_overrides=settings.symbol_overrides,
+        extra_symbols=watchlist.symbols,
+        quotes=CoinMarketCapAdapter(cmc_client).quotes if cmc_client is not None else None,
     )
+    watchlist._on_change = universe.invalidate
     context = MarketContextService(
         global_adapters,
         fear_greed_adapters,
@@ -229,6 +248,22 @@ def build_container(
     analysis = AnalysisService(settings, universe, assets, regime, session_factory)
     live_prices = LivePriceBook()
     stream = BinanceStreamManager(settings.binance_ws_base_urls, live_prices.on_message)
+    controller = AnalysisController(
+        analysis, universe, state, stream, live_prices, auto_minutes=settings.auto_analyze_minutes
+    )
+
+    news = NewsService(
+        http,
+        feeds=settings.news_feeds,
+        cryptocompare_url=settings.cryptocompare_news_url or None,
+        cache_seconds=settings.news_cache_seconds,
+        asset_names=lambda: universe_names(universe),
+        session_factory=session_factory,
+    )
+    portfolio = PortfolioService(session_factory, router, universe, analysis, watchlist, live_prices=controller)
+    chat = ChatService(
+        settings, http, lambda symbol: chat_context(analysis, controller, news, portfolio, watchlist, symbol)
+    )
     return Container(
         settings=settings,
         http=http,
@@ -244,6 +279,11 @@ def build_container(
         assets=assets,
         regime=regime,
         analysis=analysis,
+        watchlist=watchlist,
+        controller=controller,
+        news=news,
+        chat=chat,
+        portfolio=portfolio,
         stream=stream,
         live_prices=live_prices,
         cmc=cmc_client,

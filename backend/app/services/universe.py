@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -33,6 +34,7 @@ class UniverseAsset:
     listing: ListingEntry
     markets: list[MarketRef]
     unsupported_reason: str | None = None
+    watchlist: bool = False  # added manually by the user, not by market-cap rank
 
     @property
     def supported(self) -> bool:
@@ -80,7 +82,13 @@ class UniverseService:
         refresh_seconds: float,
         exclude_wrapped: bool,
         symbol_overrides: dict[str, str] | None = None,
+        extra_symbols: Callable[[], list[str]] | None = None,
+        quotes: Callable[[list[str]], Awaitable[list[ListingEntry]]] | None = None,
     ) -> None:
+        """`extra_symbols` returns the user's watchlist; `quotes` prices watchlist coins that
+        are not in the fetched listing (CoinMarketCap quotes)."""
+        self._extra = extra_symbols
+        self._quotes = quotes
         self._listing = listing
         self._router = router
         self._size = size
@@ -89,6 +97,34 @@ class UniverseService:
         self._overrides = {k.upper(): v.upper() for k, v in (symbol_overrides or {}).items()}
         self._cache = AsyncTTLCache()
         self._last_good: Universe | None = None
+
+    def invalidate(self) -> None:
+        self._cache.invalidate()
+
+    @property
+    def last(self) -> Universe | None:
+        """The latest universe built, without fetching anything."""
+        return self._last_good
+
+    async def _watch_entries(self, listing_entries: list[ListingEntry], taken: set[str]) -> tuple[list[ListingEntry], list[str]]:
+        wanted = [s for s in (self._extra() if self._extra else []) if s not in taken]
+        if not wanted:
+            return [], []
+        by_symbol: dict[str, ListingEntry] = {}
+        for entry in listing_entries:
+            if entry.symbol not in by_symbol:  # listing is rank-ordered: first is the largest coin
+                by_symbol[entry.symbol] = entry
+        errors: list[str] = []
+        missing = [s for s in wanted if s not in by_symbol]
+        if missing and self._quotes is not None:
+            try:
+                for entry in await self._quotes(missing):
+                    by_symbol.setdefault(entry.symbol, entry)
+            except Exception as exc:  # quotes are best effort; the coin is still shown
+                errors.append(f"watchlist quotes: {exc}")
+        found = [by_symbol[s] for s in wanted if s in by_symbol]
+        errors.extend(f"watchlist: no price reference found for {s}" for s in wanted if s not in by_symbol)
+        return found, errors
 
     async def get(self, *, force: bool = False) -> Universe:
         try:
@@ -116,6 +152,9 @@ class UniverseService:
             else:
                 selected.append(entry)
 
+        watch_entries, watch_errors = await self._watch_entries(listing.entries, {e.symbol for e in selected})
+        watch_symbols = {e.symbol for e in watch_entries}
+        selected = selected + watch_entries
         candidates, resolve_errors = await self._router.resolve([e.symbol for e in selected], self._overrides)
         assets: list[UniverseAsset] = []
         for rank, entry in enumerate(selected, start=1):
@@ -135,6 +174,7 @@ class UniverseService:
                     listing=entry,
                     markets=markets,
                     unsupported_reason=reason,
+                    watchlist=entry.symbol in watch_symbols,
                 )
             )
         quote_prices = {e.symbol: e.price_usd for e in listing.entries if e.symbol in USD_STABLE_QUOTES}
@@ -157,5 +197,5 @@ class UniverseService:
             listing_fetched_at=listing.fetched_at,
             listing_newest_update_age_seconds=listing.newest_update_age_seconds,
             quote_usd_prices=quote_prices,
-            errors=listing.errors + resolve_errors,
+            errors=listing.errors + resolve_errors + watch_errors,
         )

@@ -311,6 +311,20 @@ class CoinMarketCapAdapter:
     async def global_metrics(self) -> GlobalMetrics:
         return parse_cmc_global(await self._client.global_metrics())
 
+    async def quotes(self, symbols: list[str]) -> list[ListingEntry]:
+        """One entry per symbol (the highest-ranked coin when a symbol is ambiguous)."""
+        data = await self._client.quotes_latest(symbols)
+        items: list[Any] = []
+        if isinstance(data, dict):
+            for value in data.values():
+                items.extend(value if isinstance(value, list) else [value])
+        best: dict[str, ListingEntry] = {}
+        for entry in parse_cmc_listings(items):
+            current = best.get(entry.symbol)
+            if current is None or (entry.rank or 10**9) < (current.rank or 10**9):
+                best[entry.symbol] = entry
+        return list(best.values())
+
     async def fear_greed(self) -> FearGreed:
         return parse_cmc_fear_greed(await self._client.fear_and_greed_latest())
 

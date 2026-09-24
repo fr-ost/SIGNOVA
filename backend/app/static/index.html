@@ -19,19 +19,45 @@
       <span id="regime-state"></span>
       <span id="overall-state" aria-live="polite"></span>
       <span id="updated" class="muted small"></span>
-      <button id="refresh" type="button">Refresh</button>
+      <label class="toggle small" title="Refresh market data every 30 seconds (uses listing API calls)">
+        <input id="auto-refresh" type="checkbox"> Auto-refresh
+      </label>
+      <button id="refresh" type="button">Refresh data</button>
       <button id="theme" type="button" aria-label="Switch color theme">Theme</button>
     </div>
   </header>
 
   <main>
     <p class="notice">
-      Phase 2: deterministic quantitative signals (no AI yet). Spot only, no trade execution:
-      you decide and place every trade yourself. Nothing here is financial advice.
+      Manual control: nothing is analysed until you press <strong>Analyze now</strong>. Spot only, no trade
+      execution: you decide and place every trade yourself. Nothing here is financial advice.
     </p>
+
+    <section class="card controls" aria-label="Analysis controls">
+      <div class="control-row">
+        <button id="analyze" type="button" class="primary">Analyze now</button>
+        <button id="stop" type="button" class="danger">Stop</button>
+        <button id="live" type="button" title="Stream Binance prices (no API credits)">Start live prices</button>
+        <label class="small">Auto-analyze
+          <select id="auto-analyze">
+            <option value="0">Off</option>
+            <option value="15">every 15 min</option>
+            <option value="30">every 30 min</option>
+            <option value="60">every hour</option>
+            <option value="240">every 4 hours</option>
+          </select>
+        </label>
+        <span id="control-status" class="muted small" aria-live="polite">Loading status…</span>
+        <span class="spacer"></span>
+        <button id="unlock" type="button" class="ghost small" hidden>Enter admin token</button>
+      </div>
+      <div class="progress" aria-hidden="true"><span id="scan-progress"></span></div>
+    </section>
 
     <div id="error" class="alert" role="alert" hidden></div>
 
+    <div class="layout">
+    <div class="main-col">
     <section aria-label="Market context">
       <div id="tiles" class="tiles"></div>
     </section>
@@ -62,7 +88,7 @@
             </tr>
           </thead>
           <tbody id="signal-rows">
-            <tr><td colspan="10" class="empty">Scanning the Top 20 (the first scan takes a few seconds)…</td></tr>
+            <tr><td colspan="10" class="empty">No scan yet. Press “Analyze now” to analyse the Top 20 and your watchlist.</td></tr>
           </tbody>
         </table>
       </div>
@@ -74,9 +100,52 @@
       </div>
     </section>
 
+    <section class="card" aria-labelledby="portfolio-title">
+      <div class="card-head">
+        <h2 id="portfolio-title">Portfolio</h2>
+        <span id="portfolio-meta" class="muted small"></span>
+      </div>
+      <div id="portfolio-error" class="alert inset" role="alert" hidden></div>
+      <dl id="portfolio-summary" class="detail-grid"></dl>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Coin</th><th class="num">Qty</th><th class="num hide-sm">Avg entry</th><th class="num">Price</th>
+              <th class="num hide-sm">Value</th><th class="num">P/L</th><th class="num hide-sm">Alloc.</th>
+              <th class="hide-sm">Signal</th><th></th>
+            </tr>
+          </thead>
+          <tbody id="portfolio-rows"><tr><td colspan="9" class="empty">No positions yet.</td></tr></tbody>
+        </table>
+      </div>
+      <div class="card-foot forms">
+        <form id="cash-form" class="inline-form">
+          <label class="small">Cash (USD)<input id="cash-input" type="number" min="0" step="any" required></label>
+          <button type="submit">Save cash</button>
+        </form>
+        <form id="position-form" class="inline-form">
+          <input id="pos-symbol" placeholder="Coin" maxlength="15" required>
+          <input id="pos-qty" type="number" min="0" step="any" placeholder="Quantity" required>
+          <input id="pos-avg" type="number" min="0" step="any" placeholder="Avg entry price" required>
+          <button type="submit">Save position</button>
+        </form>
+        <form id="plan-form" class="inline-form">
+          <input id="plan-symbol" placeholder="Coin to plan" maxlength="15" required>
+          <input id="plan-budget" type="number" min="0" step="any" placeholder="Budget (optional)">
+          <button type="submit">Plan trade (DCA + P/L)</button>
+        </form>
+        <div id="plan-result"></div>
+        <details>
+          <summary class="small">Risk settings (used for every signal's position size)</summary>
+          <form id="risk-form" class="risk-form"></form>
+        </details>
+      </div>
+    </section>
+
     <section class="card" aria-labelledby="market-title">
       <div class="card-head">
-        <h2 id="market-title">Top 20 universe</h2>
+        <h2 id="market-title">Top 20 + watchlist</h2>
         <span id="universe-meta" class="muted small"></span>
       </div>
       <div class="table-wrap">
@@ -137,18 +206,62 @@
       </div>
       <div id="provider-notes" class="card-foot small" hidden></div>
     </section>
+    </div>
+
+    <aside class="side-col">
+      <section class="card chat" aria-labelledby="chat-title">
+        <div class="card-head">
+          <h2 id="chat-title">AI assistant</h2>
+          <button id="chat-clear" type="button" class="ghost small">Clear</button>
+        </div>
+        <div id="chat-log" class="chat-log" aria-live="polite">
+          <p class="muted small chat-hint">Ask about the latest scan, a coin's setup, news or your portfolio. The assistant
+            sees the dashboard's data; its answers never change a signal.</p>
+        </div>
+        <form id="chat-form" class="chat-form">
+          <select id="chat-symbol" aria-label="Coin to focus on"><option value="">All coins</option></select>
+          <textarea id="chat-input" rows="2" maxlength="4000" placeholder="e.g. Which setup has the best risk:reward right now?" required></textarea>
+          <button type="submit" class="primary">Send</button>
+        </form>
+      </section>
+
+      <section class="card" aria-labelledby="watch-title">
+        <div class="card-head">
+          <h2 id="watch-title">Watchlist</h2>
+          <span class="muted small">analysed with the Top 20</span>
+        </div>
+        <form id="watch-form" class="inline-form">
+          <input id="watch-symbol" placeholder="Symbol, e.g. PEPE" maxlength="15" required autocomplete="off">
+          <button type="submit">Add</button>
+        </form>
+        <div id="watch-items" class="chips"></div>
+      </section>
+
+      <section class="card" aria-labelledby="news-title">
+        <div class="card-head">
+          <h2 id="news-title">Latest crypto news</h2>
+          <button id="news-refresh" type="button" class="ghost small">Refresh</button>
+        </div>
+        <div id="news-meta" class="chips small muted"></div>
+        <div id="trending" class="chips"></div>
+        <ul id="news-list" class="news-list"><li class="muted small">Loading headlines…</li></ul>
+      </section>
+    </aside>
+    </div>
   </main>
 
   <footer class="small">
     <a href="/api/docs">API docs</a>
     <a href="/api">API index</a>
     <a href="/health">Health</a>
-    <span>Market data updates every 30 seconds while this tab is visible; signals are recomputed at most every 2 minutes.</span>
+    <span>Market data refreshes only when you ask (or with Auto-refresh on); signals only when you press Analyze now or switch on Auto-analyze.</span>
   </footer>
 
   <dialog id="detail" aria-labelledby="detail-title">
     <div class="detail-head">
       <h2 id="detail-title">Asset</h2>
+      <span class="spacer"></span>
+      <button id="detail-ask" type="button" class="ghost">Ask AI about this coin</button>
       <button id="detail-close" type="button">Close</button>
     </div>
     <div id="detail-body" class="detail-body"></div>

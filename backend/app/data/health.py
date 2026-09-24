@@ -115,6 +115,15 @@ class ProviderHealthRegistry:
         item.total_requests += 1
         item.last_error = error[:500]
 
+    def note_plan_limited(self, provider: str, message: str) -> None:
+        """An endpoint outside the API plan: counted as a request, never as an error."""
+        item = self._item(provider)
+        item.total_requests += 1
+        notes = item.details.setdefault("plan_limited", [])
+        if message not in notes:
+            notes.append(message[:200])
+            del notes[:-5]
+
     def set_circuit(self, provider: str, state: str) -> None:
         item = self._item(provider)
         if item.circuit_state != state:

@@ -285,6 +285,10 @@ class ProviderHttpClient:
         if isinstance(classified, ProviderRestricted):
             self._health.record_failure(self.provider, classified.message, status=ProviderStatus.RESTRICTED)
             raise classified
+        if isinstance(classified, ProviderPlanLimited):
+            # The key works; this endpoint is simply outside the plan. Not a provider error.
+            self._health.note_plan_limited(self.provider, classified.message)
+            raise classified
         if isinstance(classified, ProviderClientError):
             self._health.record_client_error(self.provider, classified.message)
             raise classified

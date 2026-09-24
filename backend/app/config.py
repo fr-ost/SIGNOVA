@@ -60,7 +60,7 @@ class Settings(BaseSettings):
 
     # --- application ---------------------------------------------------------
     app_name: str = "Crypto Market Analysis & Spot Signal Dashboard"
-    app_version: str = "0.2.0-phase2"
+    app_version: str = "0.4.0-phase4"
     environment: Literal["development", "test", "production"] = "development"
     log_level: str = "INFO"
     json_logs: bool = True
@@ -121,7 +121,7 @@ class Settings(BaseSettings):
     universe_size: int = 20
     universe_refresh_seconds: int = 600
     listing_refresh_seconds: int = 60
-    listing_fetch_limit: int = 100
+    listing_fetch_limit: int = 200  # still one CoinMarketCap credit; covers watchlist coins
     exclude_wrapped_assets: bool = True
     symbol_overrides: Annotated[dict[str, str], NoDecode] = Field(default_factory=dict)
 
@@ -167,7 +167,6 @@ class Settings(BaseSettings):
 
     # --- Phase 2: analysis and signals -------------------------------------------------
     analysis_cache_seconds: int = 30
-    signal_scan_cache_seconds: int = 120
     signal_scan_concurrency: int = 4
     regime_cache_seconds: int = 600
     regime_min_breadth_sample: int = 8
@@ -177,6 +176,23 @@ class Settings(BaseSettings):
     signal_persist_enabled: bool = True
     feature_persist_timeframes: CsvList = Field(default_factory=lambda: ["1h", "4h", "1d"])
     regime_persist_min_interval_seconds: int = 3600
+
+    # --- Phase 3/4: controls, watchlist, news, chat, portfolio ---------------------------
+    admin_token: SecretStr | None = None  # protects controls, chat and portfolio when set
+    auto_analyze_minutes: int = 0  # 0 = analysis runs only when "Analyze now" is pressed
+    news_cache_seconds: int = 900
+    news_feeds: CsvList = Field(
+        default_factory=lambda: [
+            "https://www.coindesk.com/arc/outboundfeeds/rss/",
+            "https://cointelegraph.com/rss",
+            "https://decrypt.co/feed",
+            "https://bitcoinmagazine.com/.rss/full/",
+        ]
+    )
+    cryptocompare_news_url: str = "https://min-api.cryptocompare.com/data/v2/news/?lang=EN"
+    openai_base_url: str = "https://api.openai.com/v1"
+    chat_max_output_tokens: int = 1500
+    chat_rate_limit_per_minute: int = 10
 
     # --- Phase 2: risk engine (defaults match the risk_settings table) --------------------
     risk_max_per_signal_pct: float = 1.0
@@ -200,6 +216,7 @@ class Settings(BaseSettings):
         "binance_ws_base_urls",
         "integrity_required_timeframes",
         "feature_persist_timeframes",
+        "news_feeds",
         mode="before",
     )
     @classmethod
@@ -248,13 +265,23 @@ class Settings(BaseSettings):
         return value or None
 
     @property
+    def admin_token_value(self) -> str | None:
+        value = self.admin_token.get_secret_value().strip() if self.admin_token else ""
+        return value or None
+
+    @property
+    def chat_models(self) -> list[str]:
+        models = [self.openai_analysis_model or "gpt-5-mini", self.openai_fallback_model or "gpt-4o-mini"]
+        return list(dict.fromkeys(m for m in models if m))
+
+    @property
     def openai_configured(self) -> bool:
         return bool(self.openai_api_key and self.openai_api_key.get_secret_value().strip())
 
     def secret_values(self) -> list[str]:
         """Secrets that must be redacted from logs."""
         values = []
-        for secret in (self.openai_api_key, self.cmc_api_key):
+        for secret in (self.openai_api_key, self.cmc_api_key, self.admin_token):
             if secret is not None and secret.get_secret_value():
                 values.append(secret.get_secret_value())
         return values

@@ -13,7 +13,8 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import Counter
-from dataclasses import asdict
+from collections.abc import Callable
+from dataclasses import asdict, replace
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -260,13 +261,28 @@ class AnalysisService:
         self._sessions = session_factory
         self._engine = SignalEngine(engine_params(settings))
         self._cache = AsyncTTLCache()
-        self._scan_cache = AsyncTTLCache()
         self._last_signal: dict[str, tuple[str, str | None]] = {}
         self._feature_timeframes = {Timeframe(value) for value in settings.feature_persist_timeframes}
 
-    async def analyze(self, symbol: str) -> AnalysisOut:
+    @property
+    def risk_params(self) -> RiskParams:
+        return self._engine.params.risk
+
+    def set_risk_params(self, risk: RiskParams) -> None:
+        """Apply edited risk settings (Phase 4) to every following analysis."""
+        self._engine = SignalEngine(replace(self._engine.params, risk=risk))
+        self._cache.invalidate()
+
+    def cached(self, symbol: str) -> AnalysisOut | None:
+        """Latest analysis for `symbol` without running anything (may be expired)."""
+        entry = self._cache.peek(("analysis", symbol.upper()))
+        return entry[0] if entry else None
+
+    async def analyze(self, symbol: str, *, force: bool = False) -> AnalysisOut:
         key = ("analysis", symbol.upper())
-        return await self._cache.get_or_load(key, lambda: self._analyze(symbol), self._s.analysis_cache_seconds)
+        return await self._cache.get_or_load(
+            key, lambda: self._analyze(symbol), self._s.analysis_cache_seconds, force=force
+        )
 
     async def _analyze(self, symbol: str) -> AnalysisOut:
         collection = await self._assets.collect(symbol)
@@ -299,22 +315,34 @@ class AnalysisService:
             market=market,
         )
 
-    async def scan(self) -> SignalScanOut:
-        return await self._scan_cache.get_or_load("scan", self._scan, self._s.signal_scan_cache_seconds)
-
-    async def _scan(self) -> SignalScanOut:
-        universe = await self._universe.get()
-        market = await self._regime.current()
+    async def run_scan(
+        self,
+        *,
+        force: bool = True,
+        on_start: Callable[[int], None] | None = None,
+        on_progress: Callable[[str], None] | None = None,
+    ) -> SignalScanOut:
+        """Analyse the whole universe now. Runs only when called (Analyze now / auto schedule)."""
+        universe = await self._universe.get(force=force)
+        market = await self._regime.current(force=force)
         semaphore = asyncio.Semaphore(max(1, self._s.signal_scan_concurrency))
+        if on_start:
+            on_start(len(universe.assets))
 
         async def one(asset: UniverseAsset) -> tuple[SignalSummaryOut, str | None]:
             async with semaphore:
                 try:
-                    return summary_out(await self.analyze(asset.symbol)), None
+                    row = summary_out(await self.analyze(asset.symbol, force=force)), None
+                except asyncio.CancelledError:
+                    raise
                 except Exception as exc:  # one asset must never take the whole scan down
                     log.exception("analysis failed", extra={"symbol": asset.symbol})
                     message = f"{type(exc).__name__}: {exc}"
-                    return _failed_summary(asset, message), f"{asset.symbol}: {message}"
+                    row = _failed_summary(asset, message), f"{asset.symbol}: {message}"
+                row[0].watchlist = asset.watchlist
+                if on_progress:
+                    on_progress(asset.symbol)
+                return row
 
         outcomes = await asyncio.gather(*(one(a) for a in universe.assets))
         rows = sorted(
