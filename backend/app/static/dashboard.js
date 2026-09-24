@@ -161,25 +161,59 @@
 
   // ---------------------------------------------------------------- network
 
-  async function getJSON(url, timeoutMs = REQUEST_TIMEOUT_MS) {
+  function storedToken() {
+    try {
+      return localStorage.getItem("adminToken") || "";
+    } catch {
+      return "";
+    }
+  }
+
+  function askToken() {
+    const value = window.prompt("This action needs the admin token (ADMIN_TOKEN on the server):", "");
+    if (value == null) return false;
+    try {
+      localStorage.setItem("adminToken", value.trim());
+    } catch {
+      /* storage unavailable */
+    }
+    return true;
+  }
+
+  async function api(url, { method = "GET", body, timeoutMs = REQUEST_TIMEOUT_MS, retried = false } = {}) {
+    try {
+      return await getJSON(url, timeoutMs, method, body);
+    } catch (err) {
+      if (err.status === 401 && !retried && askToken()) return api(url, { method, body, timeoutMs, retried: true });
+      throw err;
+    }
+  }
+
+  async function getJSON(url, timeoutMs = REQUEST_TIMEOUT_MS, method = "GET", body = undefined) {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
-      const res = await fetch(url, { headers: { Accept: "application/json" }, signal: ctrl.signal });
-      let body = null;
+      const headers = { Accept: "application/json" };
+      const token = storedToken();
+      if (token) headers["X-Admin-Token"] = token;
+      if (body !== undefined) headers["Content-Type"] = "application/json";
+      const res = await fetch(url, {
+        method, headers, signal: ctrl.signal, body: body === undefined ? undefined : JSON.stringify(body),
+      });
+      let payload = null;
       try {
-        body = await res.json();
+        payload = await res.json();
       } catch {
-        body = null;
+        payload = null;
       }
       if (!res.ok) {
-        const detail = body && typeof body.detail === "string" ? body.detail : `HTTP ${res.status}`;
+        const detail = payload && typeof payload.detail === "string" ? payload.detail : `HTTP ${res.status}`;
         const err = new Error(detail);
         err.status = res.status;
-        err.body = body;
+        err.body = payload;
         throw err;
       }
-      return body;
+      return payload;
     } catch (err) {
       if (err.name === "AbortError") throw new Error(`request to ${url} timed out`);
       throw err;
@@ -286,7 +320,7 @@
       h(
         "td",
         { class: "num" },
-        fmtPrice(row.price),
+        h("span", { "data-live-price": row.symbol, text: fmtPrice(row.price) }),
         row.price != null && row.quote_asset ? h("span", { class: "muted small hide-sm", text: " " + row.quote_asset }) : null,
       ),
       h("td", { class: "num", title: row.pct_change_24h_source ? `source: ${row.pct_change_24h_source}` : null }, delta(row.pct_change_24h)),
@@ -324,6 +358,7 @@
     $("universe-meta").textContent =
       `Ranking: ${u.listing_source}${access}${u.fallback_used ? ", fallback" : ""}${u.stale ? ", STALE" : ""} · ${counts}`;
 
+    setChatSymbols(m.assets.filter((a) => a.supported).map((a) => a.symbol));
     const rows = m.assets.map(marketRow);
     $("market-rows").replaceChildren(
       ...(rows.length ? rows : [h("tr", {}, h("td", { colspan: 10, class: "empty", text: "No assets in the universe." }))]),
@@ -358,6 +393,9 @@
           if (b.paced_credits_per_day != null) text += ` · paced at ${fmtInt(b.paced_credits_per_day)}/day`;
         }
         if (cmc.pro_disabled_reason) text += ` · key rejected: ${cmc.pro_disabled_reason}`;
+        if (cmc.unsupported_endpoints && cmc.unsupported_endpoints.length) {
+          text += ` · skipped (not in your plan, retried daily): ${cmc.unsupported_endpoints.join(", ")}`;
+        }
         notes.push(text);
       }
       if (p.provider === "binance" && p.details) {
@@ -433,7 +471,7 @@
             "aria-label": `Open the analysis for ${row.symbol}`,
             onclick: (e) => { e.stopPropagation(); open(); },
           }),
-          h("span", { class: "muted small", text: row.name }),
+          h("span", { class: "muted small" }, row.name, row.watchlist ? h("span", { class: "watch-tag", text: "watchlist" }) : null),
         ),
       ),
       h("td", {}, signalBadge(row.signal)),
@@ -475,7 +513,8 @@
     if (signalsLoading) return;
     signalsLoading = true;
     try {
-      renderSignals(await getJSON("/api/signals", SIGNALS_TIMEOUT_MS));
+      const scan = await getJSON("/api/signals");
+      if (scan) renderSignals(scan);
     } catch (err) {
       setMessage($("signals-error"), "Signals unavailable", [err.message]);
       if ($("signal-rows").querySelector(".empty")) {
@@ -524,7 +563,7 @@
 
     $("updated").textContent = `Updated ${new Date().toLocaleTimeString()}`;
     button.disabled = false;
-    button.textContent = "Refresh";
+    button.textContent = "Refresh data";
     loading = false;
   }
 
@@ -533,14 +572,16 @@
     refreshSignals();
   }
 
+  const autoRefreshOn = () => $("auto-refresh").checked;
+
   function schedule() {
     clearInterval(timer);
     timer = null;
-    if (document.visibilityState === "visible") timer = setInterval(refreshAll, REFRESH_MS);
+    if (document.visibilityState === "visible" && autoRefreshOn()) timer = setInterval(refresh, REFRESH_MS);
   }
 
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible") refreshAll();
+    if (document.visibilityState === "visible" && autoRefreshOn()) refresh();
     schedule();
   });
 
@@ -554,9 +595,12 @@
     if (d.open) d.close();
   }
 
+  let detailSymbol = null;
+
   async function openDetail(symbol) {
     const d = dialog();
     const token = ++detailToken;
+    detailSymbol = symbol;
     $("detail-title").textContent = symbol;
     $("detail-body").replaceChildren(
       h("p", { class: "muted", text: `Analysing ${symbol}: 5 timeframes of candles, order book, cross-checks and the signal engine…` }),
@@ -669,6 +713,7 @@
         h("p", { class: "signal-summary", text: a.summary }),
       ),
     );
+    parts.push(chartCard(a.symbol, a.plan));
     if (a.plan) parts.push(planCard(a.plan));
     parts.push(
       card(
@@ -942,6 +987,420 @@
     return parts;
   }
 
+  // ---------------------------------------------------------------- controls (Phase 3)
+
+  let controlTimer = null;
+  let liveTimer = null;
+  let lastScanAt = null;
+  let controlState = null;
+
+  function describeStatus(s) {
+    const scan = s.scan;
+    const parts = [];
+    if (scan.running) parts.push(`Analysing… ${scan.done}/${scan.total || "?"}`);
+    else if (scan.outcome === "completed") parts.push(`Last scan ${fmtTime(scan.finished_at)}${scan.trigger === "auto" ? " (auto)" : ""}`);
+    else if (scan.outcome === "stopped") parts.push(`Stopped ${fmtTime(scan.finished_at)}`);
+    else if (scan.outcome === "failed") parts.push(`Scan failed: ${scan.error || "unknown error"}`);
+    else parts.push("Idle: no scan yet");
+    parts.push(s.auto_minutes ? `auto every ${s.auto_minutes} min (next ${fmtTime(s.next_auto_at)})` : "auto off");
+    if (s.live.running) parts.push(`live prices on (${s.live.symbols} coins)`);
+    return parts.join(" · ");
+  }
+
+  function renderControl(s) {
+    controlState = s;
+    $("control-status").textContent = describeStatus(s);
+    $("analyze").disabled = s.scan.running;
+    $("analyze").textContent = s.scan.running ? "Analysing…" : "Analyze now";
+    $("live").textContent = s.live.running ? "Stop live prices" : "Start live prices";
+    $("auto-analyze").value = String(s.auto_minutes || 0);
+    if (![...$("auto-analyze").options].some((o) => o.value === String(s.auto_minutes))) $("auto-analyze").value = "0";
+    const pct = s.scan.running && s.scan.total ? (s.scan.done / s.scan.total) * 100 : 0;
+    $("scan-progress").style.width = `${pct}%`;
+    $("unlock").hidden = !s.auth_required || !!storedToken();
+    if (s.last_scan_at && s.last_scan_at !== lastScanAt) {
+      lastScanAt = s.last_scan_at;
+      refreshSignals();
+      refreshPortfolio();
+    }
+    scheduleControl(s.scan.running ? 2000 : 30000);
+    if (s.live.running && !liveTimer) liveTimer = setInterval(refreshLive, 5000);
+    if (!s.live.running && liveTimer) {
+      clearInterval(liveTimer);
+      liveTimer = null;
+    }
+  }
+
+  async function refreshControl() {
+    try {
+      renderControl(await getJSON("/api/control/status"));
+    } catch (err) {
+      $("control-status").textContent = `Status unavailable: ${err.message}`;
+      scheduleControl(30000);
+    }
+  }
+
+  function scheduleControl(ms) {
+    clearTimeout(controlTimer);
+    controlTimer = setTimeout(refreshControl, ms);
+  }
+
+  async function control(path, body) {
+    try {
+      renderControl(await api(path, { method: "POST", body }));
+    } catch (err) {
+      $("control-status").textContent = `${err.message}`;
+    }
+  }
+
+  async function refreshLive() {
+    try {
+      const live = await getJSON("/api/live");
+      for (const [symbol, quote] of Object.entries(live.prices)) {
+        for (const el of document.querySelectorAll(`[data-live-price="${symbol}"]`)) {
+          const text = fmtPrice(quote.price);
+          if (el.textContent !== text) {
+            el.textContent = text;
+            el.classList.remove("flash");
+            void el.offsetWidth;
+            el.classList.add("flash");
+          }
+        }
+      }
+    } catch {
+      /* next poll retries */
+    }
+  }
+
+  // ---------------------------------------------------------------- watchlist
+
+  function renderWatchlist(items) {
+    $("watch-items").replaceChildren(
+      ...(items.length
+        ? items.map((item) =>
+            h(
+              "span",
+              { class: "chip-remove", title: item.note || null },
+              item.symbol,
+              h("button", {
+                type: "button",
+                "aria-label": `Remove ${item.symbol}`,
+                text: "×",
+                onclick: async () => {
+                  try {
+                    renderWatchlist((await api(`/api/watchlist/${encodeURIComponent(item.symbol)}`, { method: "DELETE" })).items);
+                  } catch (err) {
+                    window.alert(err.message);
+                  }
+                },
+              }),
+            ),
+          )
+        : [h("span", { class: "muted small", text: "Add any coin (for example PEPE). It is analysed on the next scan." })]),
+    );
+  }
+
+  // ---------------------------------------------------------------- news
+
+  const SENTIMENT_TONE = { positive: "good", negative: "critical", neutral: "neutral" };
+
+  async function refreshNews(force = false) {
+    const list = $("news-list");
+    try {
+      const d = await getJSON(`/api/news${force ? "?refresh=true" : ""}`, 60000);
+      const counts = d.sentiment || {};
+      $("news-meta").replaceChildren(
+        h("span", { text: `${d.items.length} headlines from ${d.sources_ok.length} sources · ${fmtTime(d.fetched_at)}` }),
+        h("span", { text: `tone (keyword): ${counts.positive || 0} positive, ${counts.negative || 0} negative` }),
+        ...(d.errors.length ? [h("span", { title: d.errors.join("\n"), text: `${d.errors.length} source(s) unavailable` })] : []),
+      );
+      $("trending").replaceChildren(
+        ...(d.trending.length ? [h("span", { class: "muted small", text: "Trending on CoinGecko:" })] : []),
+        ...d.trending.slice(0, 10).map((t) =>
+          h("span", { class: "chip-remove", title: t.name }, t.symbol,
+            t.price_change_24h_pct != null ? h("span", { class: t.price_change_24h_pct >= 0 ? "pnl-up small" : "pnl-down small", text: ` ${fmtPct(t.price_change_24h_pct, 1)}` }) : null),
+        ),
+      );
+      list.replaceChildren(
+        ...(d.items.length
+          ? d.items.slice(0, 30).map((n) =>
+              h(
+                "li",
+                {},
+                h("a", { href: n.url, target: "_blank", rel: "noopener noreferrer", text: n.title }),
+                h(
+                  "div",
+                  { class: "news-sub" },
+                  h("span", { text: n.source }),
+                  n.published_at ? h("span", { text: fmtAgo(n.published_at) }) : null,
+                  n.sentiment !== "neutral" ? toneBadge(SENTIMENT_TONE[n.sentiment], humanize(n.sentiment)) : null,
+                  n.assets.length ? h("span", { text: n.assets.join(" · ") }) : null,
+                ),
+              ),
+            )
+          : [h("li", { class: "muted small", text: "No headlines available right now." })]),
+      );
+    } catch (err) {
+      list.replaceChildren(h("li", { class: "muted small", text: `News unavailable: ${err.message}` }));
+    }
+  }
+
+  // ---------------------------------------------------------------- chat
+
+  let chatMessages = [];
+  let chatBusy = false;
+
+  function renderChat() {
+    const log = $("chat-log");
+    const nodes = chatMessages.map((m) =>
+      h("div", { class: `chat-msg ${m.role}${m.error ? " error" : ""}` }, m.content, m.meta ? h("div", { class: "chat-meta", text: m.meta }) : null),
+    );
+    if (chatBusy) nodes.push(h("div", { class: "chat-msg assistant muted", text: "Thinking…" }));
+    if (!nodes.length) {
+      nodes.push(h("p", { class: "muted small chat-hint", text: "Ask about the latest scan, a coin's setup, news or your portfolio. The assistant sees the dashboard's data; its answers never change a signal." }));
+    }
+    log.replaceChildren(...nodes);
+    log.scrollTop = log.scrollHeight;
+    try {
+      sessionStorage.setItem("chat", JSON.stringify(chatMessages.filter((m) => !m.error).slice(-30)));
+    } catch {
+      /* not persisted */
+    }
+  }
+
+  async function sendChat(text) {
+    if (chatBusy || !text.trim()) return;
+    chatMessages.push({ role: "user", content: text.trim() });
+    chatBusy = true;
+    renderChat();
+    const symbol = $("chat-symbol").value || null;
+    try {
+      const history = chatMessages.filter((m) => !m.error).map(({ role, content }) => ({ role, content })).slice(-16);
+      const r = await api("/api/chat", { method: "POST", body: { messages: history, symbol }, timeoutMs: 120000 });
+      chatMessages.push({ role: "assistant", content: r.reply, meta: `${r.model}${symbol ? ` · focus ${symbol}` : ""}` });
+    } catch (err) {
+      chatMessages.push({ role: "assistant", content: `Chat unavailable: ${err.message}`, error: true });
+    } finally {
+      chatBusy = false;
+      renderChat();
+    }
+  }
+
+  function setChatSymbols(symbols) {
+    const select = $("chat-symbol");
+    const current = select.value;
+    select.replaceChildren(h("option", { value: "", text: "All coins" }), ...symbols.map((s) => h("option", { value: s, text: s })));
+    if (symbols.includes(current)) select.value = current;
+  }
+
+  // ---------------------------------------------------------------- portfolio (Phase 4)
+
+  const RISK_FIELDS = [
+    ["max_risk_per_signal_pct", "Max loss per trade, % of equity"],
+    ["max_allocation_per_opportunity_pct", "Max position size, %"],
+    ["initial_allocation_pct", "First buy (DCA), %"],
+    ["max_dca_allocation_pct", "Extra DCA buys, %"],
+    ["max_total_open_allocation_pct", "Max total exposure, %"],
+    ["fee_pct", "Fee per side, %"],
+    ["slippage_pct", "Slippage per side, %"],
+  ];
+
+  function money(v) {
+    return v == null ? DASH : nf({ maximumFractionDigits: 2 }).format(v);
+  }
+
+  function pnlSpan(value, pct) {
+    if (value == null) return h("span", { class: "muted", text: DASH });
+    return h("span", { class: value >= 0 ? "pnl-up" : "pnl-down" }, `${value >= 0 ? "+" : "−"}${money(Math.abs(value))}`,
+      pct != null ? h("div", { class: "small", text: fmtPct(pct, 1) }) : null);
+  }
+
+  function renderPortfolio(p) {
+    $("portfolio-error").hidden = true;
+    $("portfolio-meta").textContent = `${p.currency} · ${fmtTime(p.generated_at)}`;
+    $("portfolio-summary").replaceChildren(
+      kv("Equity", money(p.equity)),
+      kv("Cash", money(p.cash)),
+      kv("Invested", money(p.invested)),
+      kv("Exposure", `${p.exposure_pct.toFixed(1)}% (limit ${p.risk_settings.max_total_open_allocation_pct}%)`),
+      kv("Unrealized P/L", pnlSpan(p.unrealized_pnl)),
+    );
+    if (document.activeElement !== $("cash-input")) $("cash-input").value = p.cash;
+    const rows = p.positions.map((r) =>
+      h(
+        "tr",
+        {},
+        h("td", {}, h("button", { type: "button", class: "link-button", text: r.symbol, onclick: () => openDetail(r.symbol) })),
+        h("td", { class: "num", text: nf({ maximumFractionDigits: 8 }).format(r.quantity) }),
+        h("td", { class: "num hide-sm", text: fmtPrice(r.average_entry) }),
+        h("td", { class: "num" }, h("span", { "data-live-price": r.symbol, text: fmtPrice(r.price) })),
+        h("td", { class: "num hide-sm", text: money(r.value) }),
+        h("td", { class: "num", title: r.scenarios.map((s) => `${s.label}: ${money(s.pnl)}`).join("\n") || null }, pnlSpan(r.pnl, r.pnl_pct)),
+        h("td", { class: "num hide-sm", text: r.allocation_pct == null ? DASH : `${r.allocation_pct.toFixed(1)}%` }),
+        h("td", { class: "hide-sm" }, r.signal ? signalBadge(r.signal) : h("span", { class: "muted small", text: "not analysed" })),
+        h("td", {}, h("button", {
+          type: "button", class: "ghost small", text: "Remove",
+          onclick: async () => {
+            if (!window.confirm(`Remove the ${r.symbol} position?`)) return;
+            try { renderPortfolio(await api(`/api/portfolio/positions/${encodeURIComponent(r.symbol)}`, { method: "DELETE" })); }
+            catch (err) { portfolioError(err); }
+          },
+        })),
+      ),
+    );
+    $("portfolio-rows").replaceChildren(...(rows.length ? rows : [h("tr", {}, h("td", { colspan: 9, class: "empty", text: "No positions yet. Add what you hold below." }))]));
+    const form = $("risk-form");
+    if (!form.contains(document.activeElement)) {
+      form.replaceChildren(
+        ...RISK_FIELDS.map(([key, label]) => h("label", {}, label, h("input", { type: "number", step: "any", name: key, value: p.risk_settings[key] }))),
+        h("button", { type: "submit", text: "Save risk settings" }),
+      );
+    }
+    const box = $("portfolio-error");
+    const notes = [...p.warnings, ...p.errors];
+    if (notes.length) { setMessage(box, "Portfolio notes", notes); box.classList.add("warn"); }
+  }
+
+  function portfolioError(err) {
+    const box = $("portfolio-error");
+    box.classList.remove("warn");
+    setMessage(box, err.status === 401 ? "Admin token required to view the portfolio" : "Portfolio", [err.message]);
+  }
+
+  async function refreshPortfolio(prompt = false) {
+    try {
+      renderPortfolio(await (prompt ? api : getJSON)("/api/portfolio"));
+    } catch (err) {
+      portfolioError(err);
+    }
+  }
+
+  function renderPlan(plan) {
+    const t = plan.targets;
+    return card(
+      `Trade plan: ${plan.symbol}`,
+      `${humanize(plan.signal)} · score ${plan.score} · ${plan.quote_asset}`,
+      plan.warnings.length ? h("div", { class: "alert warn inset" }, plainList(plan.warnings)) : null,
+      h("dl", { class: "detail-grid" },
+        kv("Budget", `${money(plan.budget)} (suggested ${money(plan.suggested_budget)})`),
+        kv("Average entry if all fill", fmtPrice(plan.average_entry)),
+        kv("Stop", fmtPrice(plan.stop_loss)),
+        kv("Loss at stop", `${money(plan.loss_at_stop)} (${plan.loss_at_stop_pct_of_equity == null ? DASH : plan.loss_at_stop_pct_of_equity.toFixed(2) + "% of equity"})`),
+        kv("Targets", t.map((x) => fmtPrice(x.price)).join(" / ")),
+      ),
+      table([["DCA buy"], ["Price", "num"], ["Amount", "num"], ["Quantity", "num"]],
+        plan.tranches.map((x) => h("tr", {}, h("td", { text: x.label }), h("td", { class: "num", text: fmtPrice(x.price) }),
+          h("td", { class: "num", text: money(x.amount) }), h("td", { class: "num", text: nf({ maximumSignificantDigits: 6 }).format(x.quantity) })))),
+      table([["Scenario"], ["P/L after costs", "num"], ["% of equity", "num"]],
+        plan.scenarios.map((x) => h("tr", {}, h("td", { text: x.label }), h("td", { class: "num" }, pnlSpan(x.pnl)),
+          h("td", { class: "num", text: x.pnl_pct_of_equity == null ? DASH : fmtPct(x.pnl_pct_of_equity) })))),
+      h("div", { class: "card-foot small muted", text: plan.note }),
+    );
+  }
+
+  // ---------------------------------------------------------------- chart (Phase 3)
+
+  const SVG_NS = "http://www.w3.org/2000/svg";
+  function s(tag, attrs, ...children) {
+    const el = document.createElementNS(SVG_NS, tag);
+    for (const [k, v] of Object.entries(attrs || {})) if (v != null) el.setAttribute(k, String(v));
+    for (const c of children.flat()) if (c) el.append(c);
+    return el;
+  }
+
+  function emaSeries(values, period) {
+    const out = [];
+    let current = null;
+    const alpha = 2 / (period + 1);
+    values.forEach((v, i) => {
+      if (i === period - 1) current = values.slice(0, period).reduce((a, b) => a + b, 0) / period;
+      else if (i >= period) current += alpha * (v - current);
+      out.push(i >= period - 1 ? current : null);
+    });
+    return out;
+  }
+
+  function drawChart(container, data, plan) {
+    const all = data.candles;
+    const closes = all.map((c) => c.close);
+    const ema20 = emaSeries(closes, 20), ema50 = emaSeries(closes, 50);
+    const n = Math.min(120, all.length);
+    const candles = all.slice(-n), e20 = ema20.slice(-n), e50 = ema50.slice(-n);
+    const W = 760, H = 320, padL = 8, padR = 70, padT = 10, padB = 22;
+    const levels = plan ? [plan.stop_loss, plan.entry_low, plan.entry_high, ...plan.targets.map((t) => t.price)] : [];
+    let lo = Math.min(...candles.map((c) => c.low)), hi = Math.max(...candles.map((c) => c.high));
+    for (const v of levels) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
+    const span = hi - lo || hi * 0.01;
+    lo -= span * 0.04; hi += span * 0.04;
+    const x = (i) => padL + ((i + 0.5) * (W - padL - padR)) / n;
+    const y = (v) => padT + ((hi - v) * (H - padT - padB)) / (hi - lo);
+    const bw = Math.max(1.5, ((W - padL - padR) / n) * 0.62);
+    const grid = [0, 0.25, 0.5, 0.75, 1].map((f) => {
+      const v = hi - f * (hi - lo);
+      return [s("line", { x1: padL, x2: W - padR, y1: y(v), y2: y(v), stroke: "var(--grid)", "stroke-width": 1 }),
+        s("text", { x: W - padR + 6, y: y(v) + 4, "font-size": 11, fill: "var(--muted)" }, document.createTextNode(fmtPrice(v)))];
+    });
+    const line = (series, color) => {
+      const pts = series.map((v, i) => (v == null ? null : `${x(i).toFixed(1)},${y(v).toFixed(1)}`)).filter(Boolean);
+      return pts.length > 1 ? s("polyline", { points: pts.join(" "), fill: "none", stroke: color, "stroke-width": 2 }) : null;
+    };
+    const planMarks = [];
+    if (plan) {
+      planMarks.push(s("rect", { x: padL, width: W - padL - padR, y: y(plan.entry_high), height: Math.max(1, y(plan.entry_low) - y(plan.entry_high)), fill: "var(--accent)", opacity: 0.12 }));
+      const mark = (v, color, label) => [
+        s("line", { x1: padL, x2: W - padR, y1: y(v), y2: y(v), stroke: color, "stroke-width": 1.5, "stroke-dasharray": "5 4" }),
+        s("text", { x: padL + 4, y: y(v) - 4, "font-size": 11, fill: color }, document.createTextNode(label)),
+      ];
+      planMarks.push(...mark(plan.stop_loss, "var(--critical)", "stop"));
+      plan.targets.forEach((t, i) => planMarks.push(...mark(t.price, "var(--good)", `TP${i + 1}`)));
+    }
+    const bodies = candles.map((c, i) => {
+      const up = c.close >= c.open;
+      const color = up ? "var(--up)" : "var(--down)";
+      const top = y(Math.max(c.open, c.close)), bottom = y(Math.min(c.open, c.close));
+      return s("g", {}, s("line", { x1: x(i), x2: x(i), y1: y(c.high), y2: y(c.low), stroke: color, "stroke-width": 1 }),
+        s("rect", { x: x(i) - bw / 2, y: top, width: bw, height: Math.max(1, bottom - top), fill: color, rx: 1 }));
+    });
+    const cross = s("line", { y1: padT, y2: H - padB, stroke: "var(--muted)", "stroke-width": 1, opacity: 0, "pointer-events": "none" });
+    const svg = s("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": `${data.symbol} ${data.label} candlestick chart` },
+      grid, planMarks, bodies, line(e20, "var(--accent)"), line(e50, "var(--series-2)"), cross);
+    const tip = h("div", { class: "chart-tip", text: "Hover the chart for candle values." });
+    svg.addEventListener("mousemove", (ev) => {
+      const rect = svg.getBoundingClientRect();
+      const px = ((ev.clientX - rect.left) / rect.width) * W;
+      const i = Math.max(0, Math.min(n - 1, Math.floor(((px - padL) / (W - padL - padR)) * n)));
+      const c = candles[i];
+      cross.setAttribute("x1", x(i)); cross.setAttribute("x2", x(i)); cross.setAttribute("opacity", 0.6);
+      tip.textContent = `${new Date(c.open_time).toLocaleString()} · O ${fmtPrice(c.open)} H ${fmtPrice(c.high)} L ${fmtPrice(c.low)} C ${fmtPrice(c.close)}` +
+        (e20[i] != null ? ` · EMA20 ${fmtPrice(e20[i])}` : "") + (e50[i] != null ? ` · EMA50 ${fmtPrice(e50[i])}` : "");
+    });
+    svg.addEventListener("mouseleave", () => cross.setAttribute("opacity", 0));
+    container.replaceChildren(
+      h("div", { class: "chart-legend" },
+        h("span", {}, h("i", { class: "legend-ema20" }), "EMA20"), h("span", {}, h("i", { class: "legend-ema50" }), "EMA50"),
+        plan ? h("span", { text: "shaded: entry zone · dashed: stop and targets" }) : null,
+        h("span", { text: `${data.source} ${data.market_symbol} · closed candles` })),
+      svg, tip);
+  }
+
+  function chartCard(symbol, plan) {
+    const body = h("div", {}, h("p", { class: "muted small", style: null, text: "Loading chart…" }));
+    const buttons = ["15m", "1h", "4h", "1d"].map((tf) =>
+      h("button", { type: "button", class: "ghost small", "aria-pressed": tf === "4h" ? "true" : "false", text: tf.toUpperCase(),
+        onclick: (e) => { for (const b of buttons) b.setAttribute("aria-pressed", "false"); e.currentTarget.setAttribute("aria-pressed", "true"); load(tf); } }));
+    async function load(tf) {
+      try {
+        drawChart(body, await getJSON(`/api/assets/${encodeURIComponent(symbol)}/candles?timeframe=${tf}&limit=200`), plan);
+      } catch (err) {
+        body.replaceChildren(h("p", { class: "muted small", text: `Chart unavailable: ${err.message}` }));
+      }
+    }
+    load("4h");
+    const section = card("Price chart", null, h("div", { class: "chart-card" }, body));
+    section.querySelector(".card-head").append(h("div", { class: "chart-tools" }, buttons));
+    return section;
+  }
+
   // ---------------------------------------------------------------- theme
 
   function currentTheme() {
@@ -975,7 +1434,114 @@
       }
     });
 
-    $("refresh").addEventListener("click", refreshAll);
+    $("refresh").addEventListener("click", () => {
+      refreshAll();
+      refreshPortfolio();
+    });
+    try {
+      $("auto-refresh").checked = localStorage.getItem("autoRefresh") === "1";
+    } catch {
+      /* default off */
+    }
+    $("auto-refresh").addEventListener("change", () => {
+      try { localStorage.setItem("autoRefresh", $("auto-refresh").checked ? "1" : "0"); } catch { /* ignore */ }
+      if (autoRefreshOn()) refresh();
+      schedule();
+    });
+
+    $("analyze").addEventListener("click", () => control("/api/control/analyze"));
+    $("stop").addEventListener("click", () => control("/api/control/stop"));
+    $("live").addEventListener("click", () =>
+      control(controlState && controlState.live.running ? "/api/control/live/stop" : "/api/control/live/start"));
+    $("auto-analyze").addEventListener("change", (e) => control("/api/control/auto", { minutes: Number(e.target.value) }));
+    $("unlock").addEventListener("click", () => {
+      if (askToken()) {
+        refreshControl();
+        refreshPortfolio();
+      }
+    });
+
+    $("watch-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      try {
+        renderWatchlist((await api("/api/watchlist", { method: "POST", body: { symbol: $("watch-symbol").value } })).items);
+        $("watch-symbol").value = "";
+      } catch (err) {
+        window.alert(err.message);
+      }
+    });
+    getJSON("/api/watchlist").then((w) => renderWatchlist(w.items)).catch(() => renderWatchlist([]));
+
+    $("news-refresh").addEventListener("click", () => refreshNews(true));
+    refreshNews();
+
+    try {
+      chatMessages = JSON.parse(sessionStorage.getItem("chat") || "[]");
+    } catch {
+      chatMessages = [];
+    }
+    renderChat();
+    $("chat-form").addEventListener("submit", (e) => {
+      e.preventDefault();
+      const text = $("chat-input").value;
+      $("chat-input").value = "";
+      sendChat(text);
+    });
+    $("chat-input").addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        $("chat-form").requestSubmit();
+      }
+    });
+    $("chat-clear").addEventListener("click", () => {
+      chatMessages = [];
+      renderChat();
+    });
+    $("detail-ask").addEventListener("click", () => {
+      if (!detailSymbol) return;
+      const select = $("chat-symbol");
+      if (![...select.options].some((o) => o.value === detailSymbol)) select.append(h("option", { value: detailSymbol, text: detailSymbol }));
+      select.value = detailSymbol;
+      closeDetail();
+      $("chat-input").value = `What do you think of the ${detailSymbol} setup right now?`;
+      $("chat-input").focus();
+    });
+
+    $("cash-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      try { renderPortfolio(await api("/api/portfolio/cash", { method: "PUT", body: { cash: Number($("cash-input").value) } })); }
+      catch (err) { portfolioError(err); }
+    });
+    $("position-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const body = { symbol: $("pos-symbol").value, quantity: Number($("pos-qty").value), average_entry: Number($("pos-avg").value) };
+      try {
+        renderPortfolio(await api("/api/portfolio/positions", { method: "POST", body }));
+        e.target.reset();
+      } catch (err) { portfolioError(err); }
+    });
+    $("risk-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const body = {};
+      for (const input of e.target.querySelectorAll("input")) body[input.name] = Number(input.value);
+      try { renderPortfolio(await api("/api/portfolio/risk", { method: "PUT", body })); }
+      catch (err) { portfolioError(err); }
+    });
+    $("plan-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const out = $("plan-result");
+      out.replaceChildren(h("p", { class: "muted small", text: "Analysing and sizing…" }));
+      const budget = $("plan-budget").value ? Number($("plan-budget").value) : null;
+      try {
+        out.replaceChildren(renderPlan(await api("/api/portfolio/plan", { method: "POST", body: { symbol: $("plan-symbol").value, budget }, timeoutMs: SIGNALS_TIMEOUT_MS })));
+      } catch (err) {
+        const box = h("div", { class: "alert" });
+        setMessage(box, "No plan", [err.message]);
+        out.replaceChildren(box);
+      }
+    });
+    refreshPortfolio();
+    refreshControl();
     $("detail-close").addEventListener("click", closeDetail);
     dialog().addEventListener("close", () => {
       detailToken++;

@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from app.api.controls import router as controls_router
 from app.api.routes import router
 from app.config import Settings, get_settings
 from app.data.http import ProviderError
@@ -151,10 +152,16 @@ def create_app(
                 "/api/assets/{symbol}/analysis",
                 "/api/assets/{symbol}/candles",
                 "/api/provider-health",
+                "/api/control/status",
+                "/api/watchlist",
+                "/api/news",
+                "/api/chat",
+                "/api/portfolio",
             ],
         }
 
     app.include_router(router)
+    app.include_router(controls_router)
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
     return app
 

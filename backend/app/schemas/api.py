@@ -597,6 +597,7 @@ class SignalSummaryOut(_Model):
     suggested_allocation_pct: float | None
     summary: str
     reasons: list[str]
+    watchlist: bool = False
 
 
 class SignalScanOut(_Model):

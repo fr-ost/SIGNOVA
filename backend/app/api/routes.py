@@ -26,7 +26,6 @@ from app.schemas.api import (
     ProviderHealthListOut,
     ProviderHealthOut,
     SignalHistoryOut,
-    SignalScanOut,
     SystemStateOut,
 )
 from app.services.analysis import regime_out
@@ -140,12 +139,6 @@ async def market_regime(c: ContainerDep) -> MarketRegimeOut:
 async def asset_analysis(symbol: SymbolPath, c: ContainerDep) -> AnalysisOut:
     """Indicators, structure, regime, score, trade plan, risk checks and the final signal."""
     return await c.analysis.analyze(symbol)
-
-
-@router.get("/api/signals", response_model=SignalScanOut, tags=["signals"])
-async def signals(c: ContainerDep) -> SignalScanOut:
-    """Signals for the whole universe, best first. Cached: at most one scan per cache period."""
-    return await c.analysis.scan()
 
 
 @router.get("/api/signals/history", response_model=SignalHistoryOut, tags=["signals"])

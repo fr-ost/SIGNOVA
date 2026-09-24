@@ -33,6 +33,12 @@ async def env(test_settings):
     await engine.dispose()
 
 
+async def run_scan(http, container):
+    assert (await http.post("/api/control/analyze")).json()["started"] is True
+    await container.controller.wait()
+    return await http.get("/api/signals")
+
+
 async def count(sessions, model, *where):
     async with sessions() as s:
         stmt = select(func.count()).select_from(model)
@@ -111,8 +117,9 @@ async def test_price_conflict_and_unsupported_assets_are_no_trade(test_settings)
 
 
 async def test_signal_scan_covers_the_universe_and_history_reads_it_back(env):
-    http, sessions, _ = env
-    r = await http.get("/api/signals")
+    http, sessions, container = env
+    assert (await http.get("/api/signals")).json() is None  # nothing runs until asked
+    r = await run_scan(http, container)
     assert r.status_code == 200
     body = r.json()
     assert len(body["signals"]) == 20 and not body["errors"]
@@ -139,8 +146,8 @@ async def test_signal_scan_covers_the_universe_and_history_reads_it_back(env):
 
 
 async def test_targets_are_stored_for_signals_with_a_plan(env):
-    http, sessions, _ = env
-    await http.get("/api/signals")
+    http, sessions, container = env
+    await run_scan(http, container)
     async with sessions() as s:
         with_plan = (await s.execute(select(Signal).where(Signal.entry_low.is_not(None)))).scalars().all()
         for signal in with_plan:

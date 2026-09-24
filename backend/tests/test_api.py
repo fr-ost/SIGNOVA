@@ -199,6 +199,8 @@ async def test_postgres_end_to_end(tmp_path):
             assert (await http.get("/api/assets/SOL/candles", params={"timeframe": "5m"})).status_code == 200
             # Phase 2: JSONB features/signals, target foreign keys, feature upsert on its unique key
             assert (await http.get("/api/assets/SOL/analysis")).json()["persistence"] == "ok"
+            await http.post("/api/control/analyze")
+            await app.state.container.controller.wait()
             scan = (await http.get("/api/signals")).json()
             assert len(scan["signals"]) == 20 and not scan["errors"]
             assert (await http.get("/api/market/regime")).status_code == 200
