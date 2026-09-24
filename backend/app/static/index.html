@@ -41,8 +41,14 @@
       </label>
       <button id="refresh" type="button">Refresh data</button>
       <button id="theme" type="button" aria-label="Switch color theme">Theme</button>
+      <button id="kill" type="button" class="kill" title="Halt all analysis, live prices, news and AI calls">Emergency stop</button>
     </div>
   </header>
+  <div id="kill-banner" class="kill-banner" role="alert" hidden>
+    <strong>Emergency stop engaged</strong>
+    <span id="kill-text">All analysis, live prices, news and AI calls are halted. Stored results stay readable.</span>
+    <button id="resume" type="button">Resume</button>
+  </div>
 
   <main>
     <p class="notice">
@@ -334,7 +340,7 @@
           <input id="watch-symbol" placeholder="Symbol, e.g. PEPE" maxlength="15" required autocomplete="off">
           <button type="submit">Add</button>
         </form>
-        <div id="watch-items" class="chips"></div>
+        <ul id="watch-items" class="watch-list"></ul>
       </section>
 
       <section class="card" data-feature="mood" aria-labelledby="mood-title">

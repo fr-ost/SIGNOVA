@@ -84,6 +84,9 @@ class ScalpResult:
     risks: list[str] = field(default_factory=list)
     summary: str = ""
     data_ok: bool = True
+    status: str = ""  # short state for the table: setup now, waiting for trigger, trend not up...
+    pending: dict[str, Any] | None = None  # conditional levels while waiting for a trigger
+    if_triggered: str | None = None  # the label the evidence would allow if the pending setup triggers
 
 
 @dataclass
@@ -103,6 +106,7 @@ class _Work:
     volume_24h_quote: float | None
     quote_usd_rate: float | None
     error: str | None = None
+    pending: sc.Pending | None = None
 
 
 @dataclass
@@ -165,7 +169,9 @@ class ScalpService:
         equity: Callable[[], float | None] | None = None,
         session_factory: async_sessionmaker[AsyncSession] | None = None,
         on_candles: Callable[[str, dict[Timeframe, list[Candle]]], Any] | None = None,
+        blocked: Callable[[], bool] | None = None,
     ) -> None:
+        self._blocked = blocked or (lambda: False)
         self._s = settings
         self._universe = universe
         self._assets = assets
@@ -177,6 +183,7 @@ class ScalpService:
         self._sessions = session_factory
         self._on_candles = on_candles  # the track record evaluates open scalp signals with these
         self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._stopping = False
         self.states: dict[str, ScanState] = {h: ScanState(h) for h in sc.PROFILES}
         self.results: dict[str, dict[str, Any]] = {}
         self._pooled: dict[str, sc.BacktestStats] = {}
@@ -211,8 +218,9 @@ class ScalpService:
 
     def start_scan(self, horizon: str) -> bool:
         prof = self.profile(horizon)
-        if self.running(prof.key):
+        if self.running(prof.key) or self._blocked():
             return False
+        self._stopping = False
         self.states[prof.key] = ScanState(prof.key, running=True, outcome="running", started_at=utcnow())
         self._tasks[prof.key] = asyncio.create_task(self._scan(prof), name=f"scalp-scan-{prof.key}")
         return True
@@ -223,10 +231,15 @@ class ScalpService:
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
 
-    async def stop(self) -> None:
-        for task in list(self._tasks.values()):
-            if not task.done():
-                task.cancel()
+    async def stop(self, grace_seconds: float = 20.0) -> None:
+        """Graceful: no new coins start, the ones in progress finish; cancel only after the grace time."""
+        running = [t for t in self._tasks.values() if not t.done()]
+        if not running:
+            return
+        self._stopping = True
+        _, pending = await asyncio.wait(running, timeout=grace_seconds)
+        for task in pending:
+            task.cancel()
         await self.wait()
 
     # ------------------------------------------------------------------ scanning
@@ -259,6 +272,9 @@ class ScalpService:
 
             async def one(asset: UniverseAsset) -> _Work:
                 async with semaphore:
+                    if self._stopping:
+                        return _Work(asset, None, None, [], False, None, None, False, [], None, None, None,
+                                     error="scan stopped")
                     try:
                         return await self._work(asset, prof, p, btc)
                     except asyncio.CancelledError:
@@ -271,6 +287,9 @@ class ScalpService:
                         state.done += 1
 
             works = await asyncio.gather(*(one(a) for a in assets))
+            if self._stopping:
+                state.outcome = "stopped"
+                return
             pooled = sc.pool([w.stats for w in works if w.stats is not None])
             if pooled is not None:
                 self._pooled[prof.key] = pooled
@@ -365,6 +384,8 @@ class ScalpService:
                 break
         _, why = sc.evaluate_at(series, last, p, explain=True, is_btc=is_btc)
         base.why = base.why or why
+        if base.candidate is None:
+            base.pending = sc.pending_plan(series, last, p, is_btc=is_btc)
         base.context_ok = series.trend_up[last] and not series.filter_down[last] and (is_btc or not series.btc_down[last])
         if self._on_candles is not None:
             with contextlib.suppress(Exception):
@@ -385,15 +406,33 @@ class ScalpService:
         if w.error:
             result.reasons = [f"analysis failed: {w.error}"]
             result.summary = "NO TRADE: analysis failed"
+            result.status = "analysis failed"
             return result
         if not w.integrity_ok:
             result.reasons = [f"data integrity: {r}" for r in (w.integrity_reasons or ["integrity gate failed"])[:3]]
             result.summary = f"NO TRADE: {result.reasons[0]}"
+            result.status = "data check failed"
             return result
         cand = w.candidate
         if cand is None or w.stats is None:
             result.signal = SignalLabel.WATCH if w.context_ok else SignalLabel.NO_TRADE
-            result.reasons = (["trend context is right; waiting for an entry trigger"] if w.context_ok else []) + w.why[:3]
+            pend = w.pending
+            if pend is not None and w.stats is not None:
+                kind = sc.PULLBACK if pend.kind == "dip" else pend.kind
+                verdict, evidence_reasons, source = sc.evidence(w.stats, kind, p, pooled)
+                if not pend.fees_ok:
+                    verdict = SignalLabel.NO_TRADE
+                result.pending = _clean(asdict(pend))
+                result.if_triggered = verdict.value
+                result.setup = f"{pend.kind} (waiting)"
+                result.evidence = source
+                result.status = {"pullback": "waiting for trigger", "dip": "waiting for a dip",
+                                 "breakout": "waiting for breakout"}[pend.kind]
+                result.reasons = [f"no setup yet: {pend.text}",
+                                  f"if it triggers: {verdict.value} ({evidence_reasons[0]})"] + w.why[:1]
+            else:
+                result.status = "trend not right" if not w.context_ok else "waiting"
+                result.reasons = (["trend context is right; waiting for an entry trigger"] if w.context_ok else []) + w.why[:3]
             result.summary = f"{result.signal.value}: {result.reasons[0] if result.reasons else 'no setup'}"
             return result
 
@@ -464,6 +503,7 @@ class ScalpService:
             reasons.insert(0, "signal is older than its entry window")
         stats = pooled if source == "pooled" else w.stats
         result.expected = self._expected(stats, risk, p)
+        result.status = {SignalLabel.STRONG_BUY: "setup now", SignalLabel.BUY: "setup now"}.get(label, "setup, not taken")
         result.signal = label
         result.reasons = reasons
         result.risks = risks

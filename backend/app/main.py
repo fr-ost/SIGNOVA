@@ -21,6 +21,7 @@ from app.data.http import ProviderError
 from app.logging_config import configure_logging
 from app.services.assets import AssetNotInUniverse, AssetUnsupported
 from app.services.container import Container, build_container
+from app.services.killswitch import allowed_during_stop
 from app.services.listing import ListingUnavailable
 from app.services.spot_router import NoMarketData
 
@@ -87,6 +88,20 @@ def create_app(
             allow_methods=["GET", "POST", "PUT", "DELETE"],
             allow_headers=["*"],
         )
+
+    @app.middleware("http")
+    async def emergency_gate(request: Request, call_next):  # type: ignore[no-untyped-def]
+        """While the emergency stop is engaged, refuse everything that would call a provider,
+        a news source or OpenAI (reading stored results and the controls keep working)."""
+        container = getattr(request.app.state, "container", None)
+        kill = getattr(container, "kill", None)
+        if kill is not None and kill.active and not allowed_during_stop(request.method, request.url.path):
+            return JSONResponse(
+                status_code=503,
+                content={"detail": "Emergency stop is engaged: press Resume to allow market data, analysis, news and AI "
+                                   "again", "emergency_stop": True, "data_state": "SIGNAL_PAUSED"},
+            )
+        return await call_next(request)
 
     @app.middleware("http")
     async def security_headers(request: Request, call_next):  # type: ignore[no-untyped-def]

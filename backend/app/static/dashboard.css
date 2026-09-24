@@ -633,3 +633,30 @@ tr.detail-row > td { padding: 0; border-top: 0; }
 .r-chip { font-size: 12px; font-variant-numeric: tabular-nums; padding: 2px 8px; border-radius: 999px; background: var(--surface-2); }
 .r-chip.pos { color: var(--up); background: color-mix(in srgb, var(--up) 12%, transparent); }
 .r-chip.neg { color: var(--down); background: color-mix(in srgb, var(--down) 12%, transparent); }
+
+.status-line { margin-top: 2px; }
+tr.waiting .cond { color: var(--ink-2); font-style: italic; }
+.if-buy { color: var(--up); font-weight: 600; }
+.if-watch { color: var(--warning); font-weight: 600; }
+.if-no { color: var(--muted); }
+.conditional { border-left: 3px dashed var(--f-scalp); margin: 0 16px 10px; padding: 6px 12px; }
+.conditional p { margin: 4px 0; }
+
+/* emergency stop and watchlist removal */
+button.kill { background: var(--critical); border-color: var(--critical); color: #ffffff; font-weight: 700; }
+button.kill:hover:not(:disabled) { background: color-mix(in srgb, var(--critical) 85%, #000000); }
+.kill-banner {
+  position: sticky; top: 58px; z-index: 4; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px;
+  padding: 10px 24px; background: var(--critical); color: #ffffff; animation: rise 0.3s var(--ease) both;
+}
+.kill-banner span { flex: 1 1 280px; }
+.kill-banner button { background: #ffffff; color: var(--critical); border-color: #ffffff; font-weight: 700; }
+body.killed main { filter: saturate(0.4); }
+body.killed .progress span { animation: none; }
+.watch-list { list-style: none; margin: 0; padding: 0 16px 12px; }
+.watch-list li { display: flex; align-items: center; gap: 10px; padding: 7px 0; border-top: 1px solid var(--grid); animation: fade 0.3s var(--ease) both; }
+.watch-list li:first-child { border-top: 0; }
+button.remove { color: var(--critical); border-color: color-mix(in srgb, var(--critical) 45%, var(--border)); background: none; }
+button.remove:hover:not(:disabled) { background: var(--critical); color: #ffffff; }
+button.remove.tiny { font-size: 11px; padding: 1px 6px; margin-top: 3px; align-self: flex-start; }
+@media (max-width: 720px) { .kill-banner { position: static; padding: 10px 16px; } }

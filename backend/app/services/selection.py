@@ -89,6 +89,15 @@ class ScanSelectionService:
             self._symbols.append(value)
             await self._save()
 
+    async def discard(self, symbol: str) -> None:
+        """A coin removed from the watchlist leaves an active selection too."""
+        value = symbol.upper()
+        if value in self._symbols:
+            self._symbols.remove(value)
+            if self.mode == "selected" and not self._symbols:
+                self.mode = "all"  # an empty selection would scan nothing
+            await self._save()
+
     async def _save(self) -> None:
         if self._sessions is None:
             return

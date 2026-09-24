@@ -326,6 +326,10 @@
             onclick: (e) => { e.stopPropagation(); open(); },
           }),
           h("span", { class: "muted small", text: row.name }),
+          row.watchlist ? h("button", {
+            type: "button", class: "remove tiny", text: "Remove from watchlist",
+            onclick: (e) => { e.stopPropagation(); removeWatch(row.symbol); },
+          }) : null,
         ),
       ),
       h(
@@ -589,7 +593,7 @@
   function schedule() {
     clearInterval(timer);
     timer = null;
-    if (document.visibilityState === "visible" && autoRefreshOn()) timer = setInterval(refresh, REFRESH_MS);
+    if (document.visibilityState === "visible" && autoRefreshOn() && !emergency) timer = setInterval(refresh, REFRESH_MS);
   }
 
   document.addEventListener("visibilitychange", () => {
@@ -1020,6 +1024,47 @@
     return parts.join(" · ");
   }
 
+  let emergency = false;
+
+  function applyEmergency(st) {
+    const on = !!(st && st.active);
+    const changed = on !== emergency;
+    emergency = on;
+    document.body.classList.toggle("killed", on);
+    $("kill-banner").hidden = !on;
+    $("kill").hidden = on;
+    if (on) {
+      $("kill-text").textContent = `Since ${fmtTime(st.since)}: all analysis, live prices, news and AI calls are halted. Stored results stay readable.`;
+      clearInterval(timer);
+      timer = null;
+      if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
+    }
+    for (const id of ["analyze", "live", "auto-analyze", "scalp-scan", "refresh", "news-refresh", "mood-refresh", "events-refresh", "lab-run"]) {
+      const el = $(id);
+      if (el) el.disabled = on || (id === "analyze" && controlState && controlState.scan.running);
+    }
+    return changed;
+  }
+
+  async function killAll() {
+    if (!window.confirm("Emergency stop: halt all scans, auto-analyze, live prices, news, on-chain and AI calls now? Nothing restarts until you press Resume.")) return;
+    try {
+      renderControl(await api("/api/control/kill", { method: "POST", body: { reason: "dashboard emergency stop" } }));
+    } catch (err) {
+      window.alert(`Emergency stop failed: ${err.message}`);
+    }
+  }
+
+  async function resumeAll() {
+    try {
+      renderControl(await api("/api/control/resume", { method: "POST" }));
+      refreshAll();
+      schedule();
+    } catch (err) {
+      window.alert(`Resume failed: ${err.message}`);
+    }
+  }
+
   function renderControl(s) {
     controlState = s;
     $("control-status").textContent = describeStatus(s);
@@ -1040,6 +1085,7 @@
       if (unlocksLoaded) refreshEvents(false, true);
     }
     if (s.scalp) renderScalpStatus(s.scalp);
+    applyEmergency(s.emergency_stop);
     const scalpRunning = s.scalp && Object.values(s.scalp).some((x) => x.running);
     scheduleControl(s.scan.running || scalpRunning ? 2000 : 30000);
     if (s.live.running && !liveTimer) liveTimer = setInterval(refreshLive, 5000);
@@ -1092,29 +1138,34 @@
 
   // ---------------------------------------------------------------- watchlist
 
+  async function removeWatch(symbol) {
+    if (!window.confirm(`Remove ${symbol} from the watchlist? It will no longer be analysed.`)) return;
+    try {
+      renderWatchlist((await api(`/api/watchlist/${encodeURIComponent(symbol)}`, { method: "DELETE" })).items);
+      loadSelection();
+      if (!emergency) refresh();
+    } catch (err) {
+      window.alert(err.message);
+    }
+  }
+
   function renderWatchlist(items) {
     $("watch-items").replaceChildren(
       ...(items.length
         ? items.map((item) =>
             h(
-              "span",
-              { class: "chip-remove", title: item.note || null },
-              item.symbol,
+              "li",
+              { title: item.note || null },
+              h("strong", { text: item.symbol }),
+              item.note ? h("span", { class: "muted small", text: item.note }) : null,
+              h("span", { class: "spacer" }),
               h("button", {
-                type: "button",
-                "aria-label": `Remove ${item.symbol}`,
-                text: "×",
-                onclick: async () => {
-                  try {
-                    renderWatchlist((await api(`/api/watchlist/${encodeURIComponent(item.symbol)}`, { method: "DELETE" })).items);
-                  } catch (err) {
-                    window.alert(err.message);
-                  }
-                },
+                type: "button", class: "remove small", "aria-label": `Remove ${item.symbol} from the watchlist`,
+                text: "Remove", onclick: () => removeWatch(item.symbol),
               }),
             ),
           )
-        : [h("span", { class: "muted small", text: "Add any coin (for example PEPE). It is analysed on the next scan." })]),
+        : [h("li", { class: "muted small", text: "Add any coin (for example PEPE). It is analysed on the next scan." })]),
     );
   }
 
@@ -1336,6 +1387,20 @@
   function scalpDetail(sig) {
     const bt = sig.backtest;
     const parts = [];
+    if (!sig.plan && sig.pending) {
+      const w = sig.pending;
+      parts.push(h("div", { class: "pad conditional" },
+        h("strong", { class: "small", text: "Not a signal yet: conditional plan" }),
+        h("p", { class: "small", text: w.text }),
+        h("dl", { class: "detail-grid compact" },
+          kv(w.kind === "dip" ? "Dip buy near" : "Trigger (close above)", fmtPrice(w.trigger)),
+          kv("Stop", `${fmtPrice(w.stop)} (−${w.risk_pct.toFixed(2)}%)`),
+          kv("TP1 / TP2", `${fmtPrice(w.tp1)} / ${fmtPrice(w.tp2)}`),
+          kv("If it triggers", sig.if_triggered ? humanize(sig.if_triggered) : DASH),
+        ),
+        h("p", { class: "muted small", text: "Levels move with every candle. Re-run Find scalps after the trigger candle closes; the backtest decides whether it becomes a buy." }),
+      ));
+    }
     if (sig.plan) {
       const p = sig.plan;
       parts.push(h("dl", { class: "detail-grid compact" },
@@ -1389,19 +1454,28 @@
       renderScalp(lastScalp);
     };
     const p = sig.plan;
+    const w = !p ? sig.pending : null; // conditional levels while waiting for a trigger
     const actionable = sig.signal === "BUY" || sig.signal === "STRONG BUY";
     const planCls = actionable ? "num" : "num muted";
+    const entryCell = p
+      ? [fmtPrice(p.entry)]
+      : w ? [h("span", { class: "cond", text: `${w.kind === "dip" ? "≈ " : "> "}${fmtPrice(w.trigger)}` }),
+          h("div", { class: "muted small", text: w.kind === "dip" ? "dip buy" : "trigger" })]
+        : [DASH];
+    const level = (value, sub) => (value == null ? [DASH] : [fmtPrice(value), sub ? h("div", { class: "muted small", text: sub }) : null]);
     const row = h(
       "tr",
-      { class: `clickable${open ? " open" : ""}`, onclick: toggle, "aria-expanded": open ? "true" : "false" },
+      { class: `clickable${open ? " open" : ""}${w ? " waiting" : ""}`, onclick: toggle, "aria-expanded": open ? "true" : "false" },
       h("td", {}, h("div", { class: "asset-cell" }, h("strong", { text: sig.symbol }), h("span", { class: "muted small", text: sig.name }))),
-      h("td", {}, signalBadge(sig.signal, null)),
+      h("td", {}, signalBadge(sig.signal, null), sig.status ? h("div", { class: "muted small status-line", text: sig.status }) : null),
       h("td", { class: "hide-sm", text: sig.setup ? humanize(sig.setup) : DASH }),
-      h("td", { class: planCls, text: p ? fmtPrice(p.entry) : DASH }),
-      h("td", { class: planCls }, p ? fmtPrice(p.stop) : DASH, p ? h("div", { class: "muted small", text: `−${p.risk_pct.toFixed(2)}%` }) : null),
-      h("td", { class: planCls }, p ? fmtPrice(p.tp1) : DASH, p ? h("div", { class: "muted small", text: fmtPrice(p.tp2) }) : null),
+      h("td", { class: planCls }, ...entryCell),
+      h("td", { class: planCls }, ...(p ? level(p.stop, `−${p.risk_pct.toFixed(2)}%`) : w ? level(w.stop, `−${w.risk_pct.toFixed(2)}%`) : [DASH])),
+      h("td", { class: planCls }, ...(p ? level(p.tp1, fmtPrice(p.tp2)) : w ? level(w.tp1, fmtPrice(w.tp2)) : [DASH])),
       h("td", { class: "num", title: sig.evidence === "pooled" ? "coin has too few trades: pooled record of all scanned coins decides" : null },
-        backtestText(sig.backtest), sig.evidence === "pooled" ? h("div", { class: "muted small", text: "pooled" }) : null),
+        backtestText(sig.backtest),
+        sig.if_triggered ? h("div", { class: `small if-${sig.if_triggered === "NO TRADE" ? "no" : sig.if_triggered === "WATCH" ? "watch" : "buy"}`, text: `if triggered: ${humanize(sig.if_triggered)}` })
+          : sig.evidence === "pooled" ? h("div", { class: "muted small", text: "pooled" }) : null),
       h("td", { class: "hide-sm" }, h("span", { class: "reason", text: sig.reasons[0] || "" })),
     );
     if (!open) return [row];
@@ -2205,7 +2279,12 @@
       if (e.target === dialog()) closeDetail();
     });
 
-    refreshAll();
+    $("kill").addEventListener("click", killAll);
+    $("resume").addEventListener("click", resumeAll);
+    getJSON("/api/control/status").then((st) => {
+      renderControl(st);
+      if (emergency) refreshSignals(); else refreshAll();
+    }).catch(() => refreshAll());
     schedule();
     const hash = decodeURIComponent(location.hash.slice(1));
     if (/^[A-Za-z0-9]{1,20}$/.test(hash)) openDetail(hash.toUpperCase());

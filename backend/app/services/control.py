@@ -19,13 +19,14 @@ from app.core.enums import ProcessingState
 from app.core.timeutil import utcnow
 from app.data.providers.binance_ws import BinanceStreamManager
 from app.schemas.api import SignalScanOut
-from app.services.analysis import AnalysisService
+from app.services.analysis import AnalysisService, ScanStopped
 from app.services.system_state import SystemStateStore
 from app.services.universe import UniverseService
 
 log = logging.getLogger(__name__)
 
 MIN_AUTO_MINUTES = 5
+STOP_GRACE_SECONDS = 20.0  # a stopped scan may finish its coins in progress for this long
 
 
 @dataclass
@@ -65,6 +66,7 @@ class AnalysisController:
         self._auto_task: asyncio.Task[None] | None = None
         self._next_auto_at: datetime | None = None
         self._live_symbols: dict[str, str] = {}  # exchange symbol -> base asset
+        self._stopping = False
         self._initial_auto = auto_minutes
 
     # ------------------------------------------------------------------ scans
@@ -74,13 +76,15 @@ class AnalysisController:
         return self._task is not None and not self._task.done()
 
     def start_scan(self, trigger: str = "manual") -> bool:
-        """Start a scan in the background. Returns False if one is already running."""
-        if self.running:
+        """Start a scan in the background. Returns False if one is already running or the
+        emergency stop is engaged."""
+        if self.running or self._state.emergency_stop:
             return False
         self.progress = ScanProgress(
             running=True, started_at=utcnow(), outcome="running", trigger=trigger
         )
         self._state.processing_state = ProcessingState.ANALYZING
+        self._stopping = False
         self._task = asyncio.create_task(self._scan(), name="analysis-scan")
         return True
 
@@ -94,8 +98,12 @@ class AnalysisController:
             progress.done += 1
 
         try:
-            self.last_scan = await self._analysis.run_scan(on_start=on_start, on_progress=on_progress)
+            self.last_scan = await self._analysis.run_scan(
+                on_start=on_start, on_progress=on_progress, should_stop=lambda: self._stopping
+            )
             progress.outcome = "completed"
+        except ScanStopped:
+            progress.outcome = "stopped"
         except asyncio.CancelledError:
             progress.outcome = "stopped"
             raise
@@ -116,13 +124,21 @@ class AnalysisController:
                 await self._task
 
     async def stop(self) -> None:
-        """Cancel everything: the running scan, the auto schedule and live monitoring."""
+        """Stop everything: the running scan, the auto schedule and live monitoring.
+
+        The scan stops gracefully (no new coins; the ones in progress finish, so no database
+        write is cut in half); it is cancelled only if it has not ended after STOP_GRACE_SECONDS."""
         self.set_auto(0)
         if self.running and self._task is not None:
-            self._task.cancel()
+            self._stopping = True
+            done, _ = await asyncio.wait({self._task}, timeout=STOP_GRACE_SECONDS)
+            if not done:
+                self._task.cancel()
             await self.wait()
         await self.stop_live()
-        self._state.processing_state = ProcessingState.IDLE
+        self._state.processing_state = (
+            ProcessingState.EMERGENCY_STOP if self._state.emergency_stop else ProcessingState.IDLE
+        )
 
     # ------------------------------------------------------------------ schedule
 
@@ -144,7 +160,7 @@ class AnalysisController:
             self.start_scan(trigger="auto")
 
     def start_background(self) -> None:
-        if self._initial_auto:
+        if self._initial_auto and not self._state.emergency_stop:
             self.set_auto(self._initial_auto)
 
     # ------------------------------------------------------------------ live monitoring
@@ -155,6 +171,8 @@ class AnalysisController:
 
     async def start_live(self) -> list[str]:
         """Stream Binance mini-tickers for the universe (no REST calls, no credits)."""
+        if self._state.emergency_stop:
+            raise RuntimeError("emergency stop is engaged")
         if self._stream is None:
             raise RuntimeError("live stream unavailable")
         universe = await self._universe.get()

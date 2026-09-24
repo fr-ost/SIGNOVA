@@ -51,7 +51,27 @@ def full_status(c: Container) -> dict[str, Any]:
         "auth_required": c.settings.admin_token_value is not None,
         "chat_available": c.chat.configured,
         "watchlist": c.watchlist.symbols(),
+        "emergency_stop": c.kill.status(),
     }
+
+
+class KillIn(BaseModel):
+    reason: str | None = Field(default=None, max_length=200)
+
+
+@router.post("/api/control/kill", tags=["control"])
+async def emergency_stop(c: ContainerDep, _: Admin, body: KillIn | None = None) -> dict[str, Any]:
+    """Emergency stop: halt scans, schedule, lab and live prices, and refuse every provider, news
+    and AI call until Resume. Survives restarts."""
+    await c.emergency_stop(body.reason if body else None)
+    return full_status(c)
+
+
+@router.post("/api/control/resume", tags=["control"])
+async def emergency_resume(c: ContainerDep, _: Admin) -> dict[str, Any]:
+    """Release the emergency stop. Nothing restarts on its own: press Analyze now when ready."""
+    await c.resume()
+    return full_status(c)
 
 
 @router.get("/api/control/status", tags=["control"])
@@ -143,6 +163,8 @@ HorizonQuery = Annotated[str, Query(pattern=r"^(15m|1h|4h)$")]
 @router.post("/api/scalp/scan", tags=["scalp"])
 async def scalp_scan(c: ContainerDep, _: Admin, horizon: HorizonQuery = "1h") -> dict[str, Any]:
     """Find scalp setups on the selected coins now (in the background), with a backtest per coin."""
+    if c.kill.active:
+        raise HTTPException(status_code=503, detail="emergency stop is engaged")
     started = c.scalp.start_scan(horizon)
     return {"started": started, "status": c.scalp.status()}
 
@@ -194,6 +216,8 @@ async def add_watch(body: WatchIn, c: ContainerDep, _: Admin) -> dict[str, Any]:
 @router.delete("/api/watchlist/{symbol}", tags=["watchlist"])
 async def remove_watch(symbol: SymbolPath, c: ContainerDep, _: Admin) -> dict[str, Any]:
     removed = await c.watchlist.remove(symbol)
+    if removed:
+        await c.selection.discard(symbol)
     return {"removed": removed, "items": [{"symbol": s, "note": n} for s, n in c.watchlist.items()]}
 
 

@@ -14,6 +14,7 @@ import httpx
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.config import Settings
+from app.core.enums import ProcessingState
 from app.core.timeutil import utcnow
 from app.data.adapters.base import (
     AltcoinSeasonAdapter,
@@ -49,6 +50,7 @@ from app.services.control import AnalysisController
 from app.services.news import NewsService
 from app.services.onchain import OnChainService
 from app.services.events import EventsService
+from app.services.killswitch import KillSwitch
 from app.analysis.engine import STRATEGY
 from app.services.outcomes import OutcomeTracker
 from app.services.scalp import ScalpService
@@ -106,6 +108,7 @@ class Container:
     events: EventsService
     scalp: ScalpService
     tracker: OutcomeTracker
+    kill: KillSwitch
     stream: BinanceStreamManager | None = None
     live_prices: LivePriceBook = field(default_factory=LivePriceBook)
     cmc: CoinMarketCapClient | None = None
@@ -113,17 +116,28 @@ class Container:
 
     async def warmup(self) -> None:
         """Startup checks that must never block or crash the app (e.g. CMC plan detection)."""
+        await self.kill.load()  # first: an engaged emergency stop keeps the schedule off
         await self.watchlist.load()
         await self.selection.load()
         await self.portfolio.load()
         self.controller.start_background()
-        if self.cmc is not None and self.cmc.has_key:
+        if self.cmc is not None and self.cmc.has_key and not self.kill.active:
             try:
                 await self.cmc.refresh_plan(force=True)
             except Exception:  # defensive: warmup is best effort
                 log.exception("CoinMarketCap plan check failed during startup")
             else:
                 log.info("CoinMarketCap access mode", extra={"mode": self.cmc.mode})
+
+    async def emergency_stop(self, reason: str | None = None) -> None:
+        """Halt everything: scans, schedule, lab, live prices; refuse outside calls until resumed."""
+        await self.kill.engage(reason)  # first, so nothing new can start while we stop the rest
+        await self.scalp.stop()
+        await self.controller.stop()
+        self.state.processing_state = ProcessingState.EMERGENCY_STOP
+
+    async def resume(self) -> None:
+        await self.kill.release()
 
     async def aclose(self) -> None:
         await self.scalp.stop()
@@ -328,7 +342,9 @@ def build_container(
         equity=portfolio.equity_at_cost,
         session_factory=session_factory,
         on_candles=tracker.update,
+        blocked=lambda: state.emergency_stop,
     )
+    kill = KillSwitch(state, session_factory)
     analysis.sentiment_for = sentiment.for_asset
     analysis.event_notes = events.notes_for
     analysis.before_scan = before_scan
@@ -363,6 +379,7 @@ def build_container(
         events=events,
         scalp=scalp,
         tracker=tracker,
+        kill=kill,
         stream=stream,
         live_prices=live_prices,
         cmc=cmc_client,

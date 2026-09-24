@@ -30,6 +30,7 @@ class SystemStateStore:
     data_state_reasons: list[str] = field(default_factory=list)
     signal_paused_reason: str | None = None
     updated_at: datetime = field(default_factory=utcnow)
+    emergency_stop: bool = False  # set by the kill switch: nothing may start while True
 
     def update_data_state(self, state: DataState, reasons: list[str]) -> bool:
         """Record the aggregate data state. Returns True when the state changed."""

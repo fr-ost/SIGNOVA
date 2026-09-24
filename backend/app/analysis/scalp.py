@@ -102,10 +102,21 @@ class ScalpParams:
     setup_min_trades: int = 8  # a setup type with this many trades must itself be profitable
     pooled_min_trades: int = 40  # rules across all scanned coins, used when one coin has too few trades
     coin_max_loss_r: float = -3.0  # a coin whose own few trades lost more than this is not traded
+    # rule options the strategy lab can test (defaults = the published rules)
+    variant: str = "default"
+    setups: tuple[str, ...] = ("pullback", "breakout")
+    breakeven: bool = True  # move the stop to the entry after TP1
+    pullback_rsi_max: float = 70.0
+    min_adx: float = 0.0  # setup-timeframe ADX floor (0 = off)
+    pullback_volume_confirm: bool = False  # trigger candle volume at least its 20-candle average
+    hold_mult: float = 1.0  # time limit multiplier
 
     @property
     def cost_pct(self) -> float:
         return 2.0 * (self.fee_pct + self.slippage_pct)
+
+    def max_hold(self, profile: ScalpProfile) -> int:
+        return max(1, int(round(profile.max_hold * self.hold_mult)))
 
 
 # ----------------------------------------------------------------------------- series
@@ -160,6 +171,8 @@ class ScalpSeries:
     ema50: ind.Series
     rsi: ind.Series
     atr: ind.Series
+    adx: ind.Series
+    vol_avg: list[float | None]  # average volume of the previous 20 candles
     bb_width: list[float | None]
     vwap: list[float | None]
     trend_up: list[bool]
@@ -168,6 +181,10 @@ class ScalpSeries:
     btc_known: bool
     pivot_highs: list[tuple[int, float]]  # (confirmation index, price), by confirmation index
     pivot_confirm: list[int]
+    trend_rsi: list[float | None]  # trend timeframe, aligned to the setup candles
+    trend_dist: list[float | None]  # trend timeframe (close - EMA50) / ATR
+    trend_roc: list[float | None]  # trend timeframe 10-candle rate of change, percent
+    btc_roc: list[float | None]  # Bitcoin's trend-timeframe 10-candle rate of change
 
     def __len__(self) -> int:
         return len(self.candles)
@@ -193,12 +210,29 @@ def build_series(
     t_idx, f_idx = _align(setup, trend), _align(setup, filter_candles)
     trend_up = [j is not None and t_up[j] for j in t_idx]
     filter_down = [j is None or f_down[j] for j in f_idx]  # unknown counts as down (fail closed)
+    t_close = [c.close for c in trend]
+    t_rsi = ind.rsi(t_close, 14)
+    t_e50 = ind.ema(t_close, 50)
+    t_atr = ind.atr([c.high for c in trend], [c.low for c in trend], t_close, 14)
+    t_roc = ind.roc(t_close, 10)
+    t_dist = [(c - e) / a if e is not None and a else None for c, e, a in zip(t_close, t_e50, t_atr, strict=True)]
+    btc_roc: list[float | None] = [None] * len(setup)
     if btc_trend:
         _, b_down = _trend_state(btc_trend)
         b_idx = _align(setup, btc_trend)
         btc_down = [j is None or b_down[j] for j in b_idx]
+        b_roc = ind.roc([c.close for c in btc_trend], 10)
+        btc_roc = [b_roc[j] if j is not None else None for j in b_idx]
     else:
         btc_down = [False] * len(setup)
+    volumes = [c.volume for c in setup]
+    vol_avg: list[float | None] = [None] * len(setup)
+    window = 0.0
+    for k, v in enumerate(volumes):
+        if k >= 20:
+            vol_avg[k] = window / 20.0
+            window -= volumes[k - 20]
+        window += v
     right = 3
     pivots = sorted(
         ((p.index + right, p.price) for p in find_pivots(setup, 5, right) if p.kind == "high"), key=lambda x: x[0]
@@ -210,11 +244,13 @@ def build_series(
         open=[c.open for c in setup],
         high=highs,
         low=lows,
-        volume=[c.volume for c in setup],
+        volume=volumes,
         ema20=ind.ema(closes, 20),
         ema50=ind.ema(closes, 50),
         rsi=ind.rsi(closes, 14),
         atr=ind.atr(highs, lows, closes, 14),
+        adx=ind.dmi(highs, lows, closes, 14).adx,
+        vol_avg=vol_avg,
         bb_width=width,
         vwap=_daily_vwap(setup) if profile.use_vwap else [None] * len(setup),
         trend_up=trend_up,
@@ -223,6 +259,10 @@ def build_series(
         btc_known=bool(btc_trend),
         pivot_highs=pivots,
         pivot_confirm=[p[0] for p in pivots],
+        trend_rsi=[t_rsi[j] if j is not None else None for j in t_idx],
+        trend_dist=[t_dist[j] if j is not None else None for j in t_idx],
+        trend_roc=[t_roc[j] if j is not None else None for j in t_idx],
+        btc_roc=btc_roc,
     )
 
 
@@ -284,17 +324,22 @@ def evaluate_at(
     if prof.use_vwap and vw is not None and close <= vw:
         return no(f"price below today's VWAP {_fmt(vw)}")
 
+    if p.min_adx > 0 and (s.adx[i] is None or s.adx[i] < p.min_adx):  # type: ignore[operator]
+        return no(f"{prof.setup.label} ADX {s.adx[i] or 0:.0f} below {p.min_adx:g}: trend too weak")
     kind = None
     reasons: list[str] = []
     lo3 = min(s.low[i - 3 : i + 1])
     rsi_prev = [v for v in s.rsi[i - 5 : i] if v is not None]
+    avg_prev = s.vol_avg[i]
     # pullback continuation
     if (
-        e20 > e50 and close > e50
+        PULLBACK in p.setups
+        and e20 > e50 and close > e50
         and lo3 <= e20 + 0.3 * a and lo3 >= e50 - 0.5 * a
-        and rsi_prev and min(rsi_prev) <= 52 and r > s.rsi[i - 1] and 45 <= r <= 70  # type: ignore[operator]
+        and rsi_prev and min(rsi_prev) <= 52 and r > s.rsi[i - 1] and 45 <= r <= p.pullback_rsi_max  # type: ignore[operator]
         and close > s.open[i] and close > s.high[i - 1]
         and close - e20 <= 1.0 * a
+        and (not p.pullback_volume_confirm or (avg_prev is not None and s.volume[i] >= avg_prev))
     ):
         kind = PULLBACK
         reasons = [
@@ -310,7 +355,8 @@ def evaluate_at(
         widths = [w for w in s.bb_width[max(0, i - 100) : i] if w is not None]
         prev_w = s.bb_width[i - 1]
         if (
-            close > prior_high and close > e50
+            BREAKOUT in p.setups
+            and close > prior_high and close > e50
             and avg_vol > 0 and s.volume[i] >= p.breakout_volume_ratio * avg_vol
             and rng > 0 and (close - s.low[i]) / rng >= 0.6
             and prev_w is not None and len(widths) >= 20 and prev_w <= statistics.median(widths)
@@ -360,6 +406,106 @@ def evaluate_at(
     return cand, why
 
 
+# ----------------------------------------------------------------------------- waiting setups
+
+
+@dataclass
+class Pending:
+    """What would make a coin a trade when its trend is right but no setup has triggered yet.
+    Conditional levels only: nothing to do until the trigger happens."""
+
+    kind: str  # pullback | dip | breakout
+    trigger: float  # buy only after a candle closes above this (dip: limit price near the EMA20)
+    stop: float
+    tp1: float
+    tp2: float
+    risk_pct: float
+    fees_ok: bool
+    text: str
+
+
+def pending_plan(s: ScalpSeries, i: int, p: ScalpParams, *, is_btc: bool = False) -> Pending | None:
+    """The conditional plan at candle i, or None when the trend context is not right."""
+    if i < WARMUP or i >= len(s):
+        return None
+    a, e20, e50 = s.atr[i], s.ema20[i], s.ema50[i]
+    if a is None or a <= 0 or e20 is None or e50 is None:
+        return None
+    if not s.trend_up[i] or s.filter_down[i] or (not is_btc and s.btc_down[i]):
+        return None
+    prof = s.profile
+    close = s.close[i]
+    if PULLBACK in p.setups and e20 > e50 and close > e50 and close - e20 <= 1.0 * a:
+        kind, trigger = PULLBACK, s.high[i]
+        base_low = min(s.low[i - 3 : i + 1])
+        text = f"buy only if a {prof.setup.label} candle closes above {_fmt(trigger)} (this candle's high) with RSI rising"
+    elif PULLBACK in p.setups and e20 > e50 and close - e20 > 1.0 * a:
+        kind, trigger = "dip", e20 + 0.3 * a
+        base_low = trigger - 1.0 * a
+        text = (f"extended {((close - e20) / a):.1f} ATR above the {prof.setup.label} EMA20: wait for a dip toward "
+                f"{_fmt(trigger)}, then a close above the previous candle's high")
+    elif BREAKOUT in p.setups:
+        n = p.breakout_lookback
+        kind, trigger = BREAKOUT, max(s.high[i - n + 1 : i + 1])
+        base_low = min(s.low[i - 2 : i + 1])
+        text = (f"buy only if a {prof.setup.label} candle closes above the {n}-candle high {_fmt(trigger)} "
+                f"on {p.breakout_volume_ratio:g}x average volume")
+    else:
+        return None
+    raw = trigger - (base_low - p.stop_buffer_atr * a)
+    distance = min(max(raw, p.min_stop_atr * a), p.max_stop_atr * a)
+    stop = trigger - distance
+    if stop <= 0:
+        return None
+    risk_pct = distance / trigger * 100.0
+    fees_ok = risk_pct >= p.min_risk_cost_multiple * p.cost_pct
+    if not fees_ok:
+        text += f"; at today's volatility the stop ({risk_pct:.2f}%) is too tight for {p.cost_pct:.2f}% costs"
+    return Pending(kind, trigger, stop, trigger + p.tp1_r * distance, trigger + p.tp2_r * distance, risk_pct, fees_ok, text)
+
+
+# ----------------------------------------------------------------------------- features (ML)
+
+FEATURES = (
+    "rsi", "rsi_change", "adx", "atr_pct", "dist_ema20_atr", "ema20_slope", "volume_ratio", "bb_width_rank",
+    "body_position", "trend_rsi", "trend_dist_atr", "btc_roc", "relative_strength", "hour_sin", "hour_cos",
+    "is_breakout", "risk_cost_ratio",
+)
+
+
+def features_at(s: ScalpSeries, i: int, kind: str, risk_pct: float, cost_pct: float) -> dict[str, float]:
+    """Numbers describing the market at candle i, known at its close (inputs of the ML filter).
+    Missing values fall back to neutral constants so every trade has the same features."""
+    close, a = s.close[i], s.atr[i] or 0.0
+    e20, e20_before = s.ema20[i], s.ema20[i - 5] if i >= 5 else None
+    rsi, rsi_prev = s.rsi[i], s.rsi[i - 1]
+    atr_pct = a / close * 100.0 if close > 0 else 0.0
+    widths = [w for w in s.bb_width[max(0, i - 100) : i + 1] if w is not None]
+    rng = s.high[i] - s.low[i]
+    hour = s.candles[i].close_time.hour + s.candles[i].close_time.minute / 60.0
+    trend_roc = s.trend_roc[i] if s.trend_roc[i] is not None else 0.0
+    btc_roc = s.btc_roc[i] if s.btc_roc[i] is not None else trend_roc
+    return {
+        "rsi": rsi if rsi is not None else 50.0,
+        "rsi_change": (rsi - rsi_prev) if rsi is not None and rsi_prev is not None else 0.0,
+        "adx": s.adx[i] if s.adx[i] is not None else 20.0,
+        "atr_pct": atr_pct,
+        "dist_ema20_atr": (close - e20) / a if e20 is not None and a else 0.0,
+        "ema20_slope": ((e20 / e20_before - 1.0) * 100.0 / atr_pct) if e20 and e20_before and atr_pct else 0.0,
+        "volume_ratio": s.volume[i] / s.vol_avg[i] if s.vol_avg[i] else 1.0,
+        "bb_width_rank": ind.percentile_rank(widths, widths[-1]) / 100.0 if len(widths) >= 20 else 0.5,
+        "body_position": (close - s.low[i]) / rng if rng > 0 else 0.5,
+        "trend_rsi": s.trend_rsi[i] if s.trend_rsi[i] is not None else 50.0,
+        "trend_dist_atr": s.trend_dist[i] if s.trend_dist[i] is not None else 0.0,
+        "btc_roc": btc_roc,
+        "relative_strength": trend_roc - btc_roc,
+        "hour_sin": math.sin(2 * math.pi * hour / 24.0),
+        "hour_cos": math.cos(2 * math.pi * hour / 24.0),
+        "is_breakout": 1.0 if kind == BREAKOUT else 0.0,
+        "risk_cost_ratio": risk_pct / cost_pct if cost_pct > 0 else 10.0,
+    }
+
+
 # ----------------------------------------------------------------------------- backtest
 
 
@@ -374,6 +520,8 @@ class TradeRecord:
     r_multiple: float
     return_pct: float
     held: int
+    index: int = -1  # signal candle index in the series (for features)
+    symbol: str = ""
 
 
 @dataclass
@@ -408,34 +556,57 @@ class BacktestStats:
 
 
 def _trade(s: ScalpSeries, cand: Candidate, p: ScalpParams) -> SimResult:
+    targets = [SimTarget(cand.tp1, p.tp1_share)]
+    if p.tp1_share < 1.0:
+        targets.append(SimTarget(cand.tp2, 1.0 - p.tp1_share))
     return simulate_long(
-        s.candles, cand.index + 1, entry=cand.entry, stop=cand.stop,
-        targets=[SimTarget(cand.tp1, p.tp1_share), SimTarget(cand.tp2, 1.0 - p.tp1_share)],
-        cost_pct=p.cost_pct, max_hold=s.profile.max_hold,
+        s.candles, cand.index + 1, entry=cand.entry, stop=cand.stop, targets=targets,
+        cost_pct=p.cost_pct, max_hold=p.max_hold(s.profile), breakeven_after_first=p.breakeven,
     )
 
 
-def backtest(s: ScalpSeries, p: ScalpParams, *, is_btc: bool = False, keep_recent: int = 12) -> BacktestStats:
-    """Replay the rules over the history: one trade at a time, entries at the signal close."""
-    records: list[TradeRecord] = []
-    i = WARMUP
-    last = len(s) - 1
-    while i < last:
+def candidates(s: ScalpSeries, p: ScalpParams, *, is_btc: bool = False,
+               start: int = WARMUP, end: int | None = None) -> dict[int, Candidate]:
+    """Every setup in [start, end) (entry rules only; exits do not change them)."""
+    out: dict[int, Candidate] = {}
+    for i in range(max(start, WARMUP), min(end if end is not None else len(s), len(s))):
         cand, _ = evaluate_at(s, i, p, is_btc=is_btc)
-        if cand is None:
-            i += 1
+        if cand is not None:
+            out[i] = cand
+    return out
+
+
+def trades(s: ScalpSeries, p: ScalpParams, cands: dict[int, Candidate], *, symbol: str = "") -> list[TradeRecord]:
+    """One trade at a time through the candidate setups; a trade must finish inside the data."""
+    records: list[TradeRecord] = []
+    busy_until = -1
+    for i in sorted(cands):
+        if i <= busy_until:
             continue
+        cand = cands[i]
         res = _trade(s, cand, p)
         if res.outcome == OPEN:
             break  # not enough candles left to finish this trade
         records.append(TradeRecord(cand.kind, s.candles[i].close_time, res.exit_time, cand.entry, cand.stop,
-                                   res.outcome, res.r_multiple, res.return_pct, res.held))
-        i = (res.exit_index if res.exit_index is not None else i) + 1
-    start = WARMUP if len(s) > WARMUP else 0
+                                   res.outcome, res.r_multiple, res.return_pct, res.held, i, symbol))
+        busy_until = res.exit_index if res.exit_index is not None else i
+    return records
+
+
+def backtest(
+    s: ScalpSeries, p: ScalpParams, *, is_btc: bool = False, keep_recent: int = 12,
+    start: int = WARMUP, end: int | None = None, symbol: str = "",
+) -> BacktestStats:
+    """Replay the rules over the history (or the window [start, end)): one trade at a time,
+    entries at the signal close."""
+    records = trades(s, p, candidates(s, p, is_btc=is_btc, start=start, end=end), symbol=symbol)
+    first = max(start, WARMUP) if len(s) > WARMUP else 0
+    last = min(end if end is not None else len(s), len(s)) - 1
     return summarize(
-        records, horizon=s.profile.key, setup_timeframe=s.profile.setup.label, candles=max(0, len(s) - start),
-        period_start=s.candles[start].open_time if len(s) > start else None,
-        period_end=s.candles[-1].close_time if s.candles else None, cost_pct=p.cost_pct, keep_recent=keep_recent,
+        records, horizon=s.profile.key, setup_timeframe=s.profile.setup.label, candles=max(0, last - first + 1),
+        period_start=s.candles[first].open_time if 0 <= first < len(s) else None,
+        period_end=s.candles[last].close_time if 0 <= last < len(s) else None, cost_pct=p.cost_pct,
+        keep_recent=keep_recent,
     )
 
 
