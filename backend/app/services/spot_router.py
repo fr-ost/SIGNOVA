@@ -127,6 +127,23 @@ class SpotMarketRouter:
         base = candidates[0].base_asset if candidates else "?"
         raise NoMarketData(base, errors)
 
+    async def history(
+        self, candidates: list[MarketRef], timeframe: Timeframe, total: int
+    ) -> tuple[list[Candle], MarketRef]:
+        """Longer history for backtests: paged where the exchange supports it (Binance),
+        otherwise the most recent candles one request allows."""
+        errors: list[str] = []
+        for ref in candidates:
+            adapter = self._adapters[ref.adapter]
+            try:
+                if hasattr(adapter, "history"):
+                    return await adapter.history(ref.symbol, timeframe, total), ref
+                return await adapter.candles(ref.symbol, timeframe, min(total, 1000)), ref
+            except ProviderError as exc:
+                errors.append(f"{ref.adapter}: {exc.message}")
+        base = candidates[0].base_asset if candidates else "?"
+        raise NoMarketData(base, errors)
+
     async def order_book(self, candidates: list[MarketRef], depth: int) -> tuple[OrderBook, MarketRef]:
         errors: list[str] = []
         for ref in candidates:

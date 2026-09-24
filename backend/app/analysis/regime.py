@@ -7,6 +7,8 @@ Market regime: Bitcoin's daily trend plus market breadth (share of the universe 
 above its daily EMA50), with Fear & Greed and global metrics attached as context. The
 regime caps what the signal engine may emit: a bear market allows no spot buy signals,
 a neutral market allows BUY but not STRONG BUY, and an unknown regime is treated as bear.
+Bitcoin's 4H trend is reported separately: altcoins rarely rise while Bitcoin falls on the
+4H chart, so the risk engine caps altcoin signals when it is down.
 """
 
 from __future__ import annotations
@@ -127,6 +129,8 @@ class MarketRegimeResult:
     flags: list[str] = field(default_factory=list)
     reasons: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    btc_trend_4h: TrendDirection | None = None
+    btc_rsi_4h: float | None = None
 
 
 _MAX_SIGNAL = {
@@ -148,6 +152,7 @@ def classify_market_regime(
     bull_breadth_pct: float = 55.0,
     bear_breadth_pct: float = 45.0,
     errors: Sequence[str] = (),
+    btc_4h: IndicatorSnapshot | None = None,
 ) -> MarketRegimeResult:
     reasons: list[str] = []
     flags: list[str] = []
@@ -181,6 +186,12 @@ def classify_market_regime(
         elif fear_greed.value >= 80:
             flags.append("EXTREME_GREED")
 
+    btc_trend_4h = trend_direction(btc_4h)[0] if btc_4h is not None and btc_4h.ema50 is not None else None
+    if btc_trend_4h is not None:
+        reasons.append(f"Bitcoin 4H trend {btc_trend_4h.value.lower()}")
+        if btc_trend_4h == TrendDirection.DOWN:
+            flags.append("BTC_4H_DOWN")
+
     max_signal = _MAX_SIGNAL[regime]
     if max_signal != SignalLabel.STRONG_BUY:
         reasons.append(f"{regime.value.lower()} market: signals capped at {max_signal.value}")
@@ -205,4 +216,6 @@ def classify_market_regime(
         flags=flags,
         reasons=reasons,
         errors=list(errors),
+        btc_trend_4h=btc_trend_4h,
+        btc_rsi_4h=btc_4h.rsi14 if btc_4h is not None else None,
     )

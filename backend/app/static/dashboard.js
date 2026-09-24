@@ -1035,10 +1035,13 @@
       lastScanAt = s.last_scan_at;
       refreshSignals();
       refreshPortfolio();
+      refreshRecord();
       if (moodLoaded) refreshMood();  // the scan refreshed sentiment; this reads the cache
       if (unlocksLoaded) refreshEvents(false, true);
     }
-    scheduleControl(s.scan.running ? 2000 : 30000);
+    if (s.scalp) renderScalpStatus(s.scalp);
+    const scalpRunning = s.scalp && Object.values(s.scalp).some((x) => x.running);
+    scheduleControl(s.scan.running || scalpRunning ? 2000 : 30000);
     if (s.live.running && !liveTimer) liveTimer = setInterval(refreshLive, 5000);
     if (!s.live.running && liveTimer) {
       clearInterval(liveTimer);
@@ -1313,6 +1316,219 @@
       s.notes.length ? plainList(s.notes, "small") : null,
       s.recent_titles.length ? h("div", { class: "card-foot small muted" }, s.recent_titles.map((t) => h("div", { text: t }))) : null,
     );
+  }
+
+  // ---------------------------------------------------------------- scalp signals (15m / 1h / 4h)
+
+  let scalpHorizon = "1h";
+  const scalpSeen = {};
+  const scalpOpen = new Set();
+
+  function fmtR(v) {
+    return v == null ? DASH : `${v > 0 ? "+" : v < 0 ? "−" : ""}${Math.abs(v).toFixed(2)}R`;
+  }
+
+  function backtestText(bt) {
+    if (!bt || !bt.trades) return "no trades";
+    return `${bt.trades} tr · ${Math.round(bt.win_rate)}% · ${fmtR(bt.expectancy_r)}`;
+  }
+
+  function scalpDetail(sig) {
+    const bt = sig.backtest;
+    const parts = [];
+    if (sig.plan) {
+      const p = sig.plan;
+      parts.push(h("dl", { class: "detail-grid compact" },
+        kv("Buy zone", `${fmtPrice(p.entry_low)} to ${fmtPrice(p.entry_high)}`),
+        kv("Stop", `${fmtPrice(p.stop)} (−${p.risk_pct.toFixed(2)}%)`),
+        kv("Net R:R", `${p.reward_risk_tp1.toFixed(2)} at TP1 · ${p.reward_risk_tp2.toFixed(2)} at TP2`),
+        kv("Size", `${p.suggested_allocation_pct.toFixed(1)}% of portfolio (risks ${p.risk_at_allocation_pct.toFixed(2)}%)`),
+        kv("Costs", `${p.cost_pct.toFixed(2)}% round trip`),
+        kv("Valid until", `${fmtTime(p.valid_until)} · ${p.time_exit}`),
+      ));
+    }
+    if (sig.expected && sig.expected.risk_per_trade) {
+      const e = sig.expected;
+      parts.push(h("p", { class: "small pad expected" },
+        `At your settings you risk ${fmtUsd(e.risk_per_trade)} per trade. Measured average: ${fmtR(e.expectancy_r)} ≈ `,
+        h("strong", { text: `${e.expected_per_trade >= 0 ? "+" : "−"}$${Math.abs(e.expected_per_trade).toFixed(2)} per trade` }),
+        e.trades_per_day ? ` · about ${e.trades_per_day} setups a day on this coin` : "",
+        ` (${e.note}).`,
+      ));
+    } else if (sig.expected) {
+      parts.push(h("p", { class: "small pad muted", text: "Enter your cash in Portfolio to see the measured average in dollars per trade." }));
+    }
+    parts.push(h("div", { class: "pad" }, h("strong", { class: "small", text: "Why" }), plainList(sig.reasons, "small")));
+    if (sig.risks.length) parts.push(h("div", { class: "pad" }, h("strong", { class: "small", text: "Risks" }), plainList(sig.risks, "small")));
+    if (bt && bt.trades) {
+      const outcomes = Object.entries(bt.outcomes).map(([k, v]) => `${humanize(k)} ${v}`).join(" · ");
+      const setups = Object.entries(bt.by_setup).filter(([, v]) => v.trades).map(([k, v]) => `${k}: ${v.trades} trades, ${fmtR(v.expectancy_r)}`).join(" · ");
+      parts.push(h("dl", { class: "detail-grid compact" },
+        kv("Backtest", `${bt.days} days of ${bt.setup_timeframe} candles`),
+        kv("Win rate", `${Math.round(bt.win_rate)}% of ${bt.trades}`),
+        kv("Expectancy", `${fmtR(bt.expectancy_r)} per trade`),
+        kv("Profit factor", bt.no_losses ? "no losses" : bt.profit_factor == null ? DASH : bt.profit_factor.toFixed(2)),
+        kv("Max drawdown", fmtR(-bt.max_drawdown_r)),
+        kv("Exits", outcomes),
+        kv("By setup", setups || DASH),
+      ));
+      if (bt.recent.length) {
+        parts.push(h("div", { class: "pad recent-trades" },
+          h("span", { class: "small muted", text: "Last backtest trades: " }),
+          ...bt.recent.slice(-10).map((t) => h("span", { class: `r-chip ${t.r_multiple > 0 ? "pos" : "neg"}`, title: `${t.kind} · ${new Date(t.entry_time).toLocaleString()} · ${humanize(t.outcome)}`, text: fmtR(t.r_multiple) })),
+        ));
+      }
+    }
+    return parts;
+  }
+
+  function scalpRows(sig) {
+    const open = scalpOpen.has(sig.symbol);
+    const toggle = () => {
+      if (scalpOpen.has(sig.symbol)) scalpOpen.delete(sig.symbol); else scalpOpen.add(sig.symbol);
+      renderScalp(lastScalp);
+    };
+    const p = sig.plan;
+    const actionable = sig.signal === "BUY" || sig.signal === "STRONG BUY";
+    const planCls = actionable ? "num" : "num muted";
+    const row = h(
+      "tr",
+      { class: `clickable${open ? " open" : ""}`, onclick: toggle, "aria-expanded": open ? "true" : "false" },
+      h("td", {}, h("div", { class: "asset-cell" }, h("strong", { text: sig.symbol }), h("span", { class: "muted small", text: sig.name }))),
+      h("td", {}, signalBadge(sig.signal, null)),
+      h("td", { class: "hide-sm", text: sig.setup ? humanize(sig.setup) : DASH }),
+      h("td", { class: planCls, text: p ? fmtPrice(p.entry) : DASH }),
+      h("td", { class: planCls }, p ? fmtPrice(p.stop) : DASH, p ? h("div", { class: "muted small", text: `−${p.risk_pct.toFixed(2)}%` }) : null),
+      h("td", { class: planCls }, p ? fmtPrice(p.tp1) : DASH, p ? h("div", { class: "muted small", text: fmtPrice(p.tp2) }) : null),
+      h("td", { class: "num", title: sig.evidence === "pooled" ? "coin has too few trades: pooled record of all scanned coins decides" : null },
+        backtestText(sig.backtest), sig.evidence === "pooled" ? h("div", { class: "muted small", text: "pooled" }) : null),
+      h("td", { class: "hide-sm" }, h("span", { class: "reason", text: sig.reasons[0] || "" })),
+    );
+    if (!open) return [row];
+    return [row, h("tr", { class: "detail-row" }, h("td", { colspan: 8 }, h("div", { class: "scalp-detail" }, ...scalpDetail(sig))))];
+  }
+
+  let lastScalp = null;
+
+  function renderScalp(res) {
+    lastScalp = res;
+    const rows = $("scalp-rows");
+    if (!res) {
+      rows.replaceChildren(h("tr", {}, h("td", { colspan: 8, class: "empty", text: "No scan yet for this horizon. Press “Find scalps”." })));
+      $("scalp-meta").textContent = "";
+      $("scalp-pooled").hidden = true;
+      return;
+    }
+    const c = res.counts;
+    $("scalp-meta").textContent = `${res.label}: setup ${res.setup_timeframe}, trend ${res.trend_timeframe}, filter ${res.filter_timeframe} · `
+      + `${c["STRONG BUY"] + c.BUY} buy, ${c.WATCH} watch · ${fmtTime(res.generated_at)}`;
+    const pool = res.pooled;
+    if (pool && pool.trades) {
+      $("scalp-pooled").textContent = `Same rules across ${pool.coins} coins, ${pool.days} days: ${pool.trades} trades, win rate ${Math.round(pool.win_rate)}%, `
+        + `expectancy ${fmtR(pool.expectancy_r)}, profit factor ${pool.no_losses ? "no losses" : pool.profit_factor == null ? DASH : pool.profit_factor.toFixed(2)} `
+        + `(net of ${res.cost_pct.toFixed(2)}% costs).`;
+      $("scalp-pooled").hidden = false;
+    } else {
+      $("scalp-pooled").hidden = true;
+    }
+    const err = $("scalp-error");
+    if (res.errors.length) setMessage(err, "Some coins could not be analysed", res.errors.slice(0, 5)); else err.hidden = true;
+    rows.replaceChildren(...(res.signals.length ? res.signals.flatMap(scalpRows)
+      : [h("tr", {}, h("td", { colspan: 8, class: "empty", text: "No coins analysed (check Coins to analyse)." }))]));
+  }
+
+  async function refreshScalp() {
+    const horizon = scalpHorizon;
+    try {
+      const r = await getJSON(`/api/scalp?horizon=${horizon}`);
+      if (horizon !== scalpHorizon) return; // the user switched horizon while this was loading
+      renderScalp(r.result);
+      renderScalpStatus(r.status);
+    } catch (err) {
+      if (horizon === scalpHorizon) setMessage($("scalp-error"), `Scalp signals unavailable: ${err.message}`);
+    }
+  }
+
+  function renderScalpStatus(all) {
+    if (!all) return;
+    const st = all[scalpHorizon];
+    const button = $("scalp-scan");
+    button.disabled = !!(st && st.running);
+    button.textContent = st && st.running ? "Scanning…" : "Find scalps";
+    let text = "";
+    if (st) {
+      if (st.running) text = `Backtesting and scanning… ${st.done}/${st.total || "?"}`;
+      else if (st.outcome === "stopped") text = `Stopped ${fmtTime(st.finished_at)}`;
+      else if (st.outcome === "failed") text = `Scan failed: ${st.error || "unknown error"}`;
+    }
+    $("scalp-status").textContent = text;
+    $("scalp-progress").style.width = st && st.running && st.total ? `${(st.done / st.total) * 100}%` : "0%";
+    for (const [key, value] of Object.entries(all)) {
+      const seen = scalpSeen[key];
+      if (value.finished_at && seen !== undefined && seen !== value.finished_at && key === scalpHorizon) {
+        refreshScalp();
+        refreshRecord();
+      }
+      scalpSeen[key] = value.finished_at;
+    }
+  }
+
+  function setHorizon(key) {
+    scalpHorizon = key;
+    renderScalp(null); // clear the other horizon's rows at once
+    pref("scalpHorizon", key);
+    document.querySelectorAll(".segmented [data-horizon]").forEach((b) => b.setAttribute("aria-checked", b.dataset.horizon === key ? "true" : "false"));
+    scalpOpen.clear();
+    refreshScalp();
+  }
+
+  async function startScalp() {
+    try {
+      const r = await api(`/api/scalp/scan?horizon=${scalpHorizon}`, { method: "POST" });
+      renderScalpStatus(r.status);
+      scheduleControl(1000);
+    } catch (err) {
+      setMessage($("scalp-error"), `Could not start the scan: ${err.message}`);
+    }
+  }
+
+  // ---------------------------------------------------------------- track record
+
+  async function refreshRecord() {
+    const body = $("record-body");
+    try {
+      const d = await getJSON("/api/performance?days=90");
+      if (!d.strategies.length) {
+        body.replaceChildren(h("p", { class: "muted small pad", text: d.persistence === "ok"
+          ? "No buy signals tracked yet. Every BUY from now on (swing and scalp) is followed here until it hits its stop, targets or time limit."
+          : "The track record needs the database." }));
+        return;
+      }
+      body.replaceChildren(
+        table(
+          [["Strategy"], ["Closed", "num"], ["Win rate", "num"], ["Avg", "num"], ["Total", "num hide-sm"], ["PF", "num hide-sm"], ["Open", "num"]],
+          d.strategies.map((st) => h("tr", {},
+            h("td", {}, h("strong", { text: st.label })),
+            h("td", { class: "num", text: st.closed }),
+            h("td", { class: "num", text: st.win_rate == null ? DASH : `${Math.round(st.win_rate)}%` }),
+            h("td", { class: `num ${st.avg_r > 0 ? "pnl-up" : st.avg_r < 0 ? "pnl-down" : ""}`, text: fmtR(st.avg_r) }),
+            h("td", { class: "num hide-sm", text: fmtR(st.total_r) }),
+            h("td", { class: "num hide-sm", text: st.profit_factor == null ? DASH : st.profit_factor.toFixed(2) }),
+            h("td", { class: "num", title: st.skipped ? `${st.skipped} overlapping signals not counted` : null, text: st.open }),
+          )),
+        ),
+        d.recent.length ? h("div", { class: "pad recent-trades" },
+          h("span", { class: "small muted", text: "Latest: " }),
+          ...d.recent.slice(0, 12).map((t) => h("span", {
+            class: `r-chip ${t.r_multiple > 0 ? "pos" : "neg"}`,
+            title: `${t.symbol} · ${t.label} · ${t.signal} · ${new Date(t.created_at).toLocaleString()} · ${humanize(t.outcome)} after ${t.hours} h`,
+            text: `${t.symbol} ${fmtR(t.r_multiple)}`,
+          })),
+        ) : h("p", { class: "muted small pad", text: "No finished trades yet." }),
+      );
+    } catch (err) {
+      body.replaceChildren(h("p", { class: "muted small pad", text: `Track record unavailable: ${err.message}` }));
+    }
   }
 
   // ---------------------------------------------------------------- coins to analyse (selection)
@@ -1889,6 +2105,13 @@
     $("events-refresh").addEventListener("click", () => refreshEvents(unlocksLoaded));
     $("tab-unlocks").addEventListener("click", () => selectTab("unlocks"));
     $("tab-airdrops").addEventListener("click", () => selectTab("airdrops"));
+
+    const savedHorizon = pref("scalpHorizon");
+    document.querySelectorAll(".segmented [data-horizon]").forEach((b) => b.addEventListener("click", () => setHorizon(b.dataset.horizon)));
+    setHorizon(savedHorizon === "15m" || savedHorizon === "4h" ? savedHorizon : "1h");
+    $("scalp-scan").addEventListener("click", startScalp);
+    $("record-refresh").addEventListener("click", refreshRecord);
+    refreshRecord();
 
     $("sel-all").addEventListener("click", () => presetSelection("all"));
     $("sel-none").addEventListener("click", () => presetSelection("none"));

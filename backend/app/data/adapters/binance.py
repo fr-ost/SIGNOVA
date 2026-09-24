@@ -157,6 +157,24 @@ class BinanceSpotAdapter:
         raw = await self._client.klines(symbol, timeframe.value, limit)
         return parse_klines(raw, symbol, timeframe, utcnow())
 
+    async def history(self, symbol: str, timeframe: Timeframe, total: int, page: int = 1000) -> list[Candle]:
+        """Up to `total` most recent candles, fetched backwards in pages of up to 1000 (oldest first)."""
+        now = utcnow()
+        by_open: dict[datetime, Candle] = {}
+        end_ms: int | None = None
+        while len(by_open) < total:
+            want = min(page, total - len(by_open))
+            raw = await self._client.klines(symbol, timeframe.value, want, end_time_ms=end_ms)
+            batch = parse_klines(raw, symbol, timeframe, now)
+            if not batch:
+                break
+            for c in batch:
+                by_open[c.open_time] = c
+            if len(batch) < want:
+                break  # reached the first candle the exchange has
+            end_ms = to_ms(batch[0].open_time) - 1
+        return [by_open[k] for k in sorted(by_open)][-total:]
+
     async def order_book(self, symbol: str, depth: int) -> OrderBook:
         raw = await self._client.depth(symbol, depth)
         return parse_depth(raw, symbol, utcnow())

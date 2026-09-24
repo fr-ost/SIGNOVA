@@ -50,6 +50,8 @@ def normalize_database_url(url: str) -> tuple[str, dict[str, Any]]:
         if sslmode and sslmode != "disable":
             connect_args["ssl"] = sslmode
         url = urlunsplit(parts._replace(query=urlencode(query)))
+    elif url.startswith("sqlite"):
+        connect_args["timeout"] = 30  # wait for the single SQLite writer instead of failing at once
     return url, connect_args
 
 
@@ -60,7 +62,7 @@ class Settings(BaseSettings):
 
     # --- application ---------------------------------------------------------
     app_name: str = "Crypto Market Analysis & Spot Signal Dashboard"
-    app_version: str = "0.5.1-phase5"
+    app_version: str = "0.6.0-phase6"
     environment: Literal["development", "test", "production"] = "development"
     log_level: str = "INFO"
     json_logs: bool = True
@@ -216,6 +218,12 @@ class Settings(BaseSettings):
     whale_min_eth: float = 1000.0
     whale_alert_api_key: SecretStr | None = None  # optional: labelled exchange flows, all chains
     whale_alert_min_usd: int = 1_000_000
+
+    # --- scalp signals (15m / 1h / 4h) ----------------------------------------------------
+    scalp_slippage_pct: float = 0.02  # per side; fees come from the portfolio risk settings
+    scalp_min_risk_cost_multiple: float = 2.5  # the stop must be at least this many round-trip costs away
+    scalp_min_trades: int = 15  # backtest trades a coin needs before its own record counts
+    track_record_days: int = 90
 
     # --- token unlocks and airdrops (optional keys) -------------------------------------
     events_cache_seconds: int = 21600

@@ -284,6 +284,13 @@ class PortfolioService:
     def _signal_for(self, symbol: str) -> Any:
         return self._analysis.cached(symbol)
 
+    def equity_at_cost(self) -> float | None:
+        """Cash plus positions at their average entry (no price calls); None before loading."""
+        if not self._loaded:
+            return None
+        value = self.cash + sum(p.quantity * p.average_entry for p in self.positions.values())
+        return value if value > 0 else None
+
     async def overview(self) -> dict[str, Any]:
         await self._ready()
         symbols = sorted(self.positions)

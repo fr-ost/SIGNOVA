@@ -541,6 +541,8 @@ class MarketRegimeOut(_Model):
     flags: list[str]
     reasons: list[str]
     errors: list[str]
+    btc_trend_4h: TrendDirection | None = None
+    btc_rsi_4h: float | None = None
 
 
 class AnalysisOut(_Model):

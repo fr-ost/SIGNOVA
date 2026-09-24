@@ -30,6 +30,8 @@ class RiskParams:
     max_rsi_15m_strong: float = 85.0  # STRONG BUY: no micro-spike at the entry
     max_change_24h_pct: float = 25.0
     max_atr_percentile_strong: float = 95.0
+    min_trigger_confirmations: int = 2  # of 3 on 1H: close above EMA20, MACD rising, RSI rising
+    min_book_imbalance_strong: float = -0.25  # (bids - asks) / total within the band; -0.25 = bids 60% of asks
     target_allocations: tuple[float, float, float] = (40.0, 35.0, 25.0)
 
     @property

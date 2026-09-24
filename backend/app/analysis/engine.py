@@ -30,7 +30,7 @@ from app.risk.engine import RiskCheck, RiskInputs, apply_risk, evaluate_risk
 from app.risk.params import RiskParams
 from app.risk.plan import TradePlan, build_plan, overhead_resistances
 
-ENGINE_VERSION = "quant-2.0.0"
+ENGINE_VERSION = "quant-2.1.0"
 STRATEGY = "mtf_trend_pullback"
 SETUP_TIMEFRAME = Timeframe.H4
 STRUCTURE_TIMEFRAMES = (Timeframe.H1, Timeframe.H4, Timeframe.D1)
@@ -237,6 +237,8 @@ class SignalEngine:
                 h4=snapshots.get(Timeframe.H4),
                 d1=snapshots.get(Timeframe.D1),
                 m15=snapshots.get(Timeframe.M15),
+                h1=snapshots.get(Timeframe.H1),
+                is_btc=i.symbol.upper() == "BTC",
                 trend_1d=trend_1d,
                 trend_4h=trend_4h,
                 plan=plan,

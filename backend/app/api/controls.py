@@ -11,7 +11,7 @@ import hmac
 from dataclasses import asdict
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Request
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 from pydantic import BaseModel, Field
 
 from app.api.deps import get_container
@@ -43,21 +43,27 @@ Admin = Annotated[None, Depends(require_admin)]
 # ----------------------------------------------------------------------------- analysis control
 
 
-@router.get("/api/control/status", tags=["control"])
-async def control_status(c: ContainerDep) -> dict[str, Any]:
+def full_status(c: Container) -> dict[str, Any]:
+    """The same status shape for every control endpoint, so the dashboard never loses fields."""
     return {
         **c.controller.status(),
+        "scalp": c.scalp.status(),
         "auth_required": c.settings.admin_token_value is not None,
         "chat_available": c.chat.configured,
         "watchlist": c.watchlist.symbols(),
     }
 
 
+@router.get("/api/control/status", tags=["control"])
+async def control_status(c: ContainerDep) -> dict[str, Any]:
+    return full_status(c)
+
+
 @router.post("/api/control/analyze", tags=["control"])
 async def analyze_now(c: ContainerDep, _: Admin) -> dict[str, Any]:
     """Scan the Top 20 plus the watchlist once, in the background."""
     started = c.controller.start_scan("manual")
-    return {"started": started, **c.controller.status()}
+    return {"started": started, **full_status(c)}
 
 
 class AutoIn(BaseModel):
@@ -67,14 +73,15 @@ class AutoIn(BaseModel):
 @router.post("/api/control/auto", tags=["control"])
 async def set_auto(body: AutoIn, c: ContainerDep, _: Admin) -> dict[str, Any]:
     c.controller.set_auto(body.minutes)
-    return c.controller.status()
+    return full_status(c)
 
 
 @router.post("/api/control/stop", tags=["control"])
 async def stop_all(c: ContainerDep, _: Admin) -> dict[str, Any]:
-    """Stop the running scan, the auto schedule and live monitoring."""
+    """Stop the running scans (swing and scalp), the auto schedule and live monitoring."""
+    await c.scalp.stop()
     await c.controller.stop()
-    return c.controller.status()
+    return full_status(c)
 
 
 class SelectionIn(BaseModel):
@@ -106,13 +113,13 @@ async def live_start(c: ContainerDep, _: Admin) -> dict[str, Any]:
         symbols = await c.controller.start_live()
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from None
-    return {"symbols": symbols, **c.controller.status()}
+    return {"symbols": symbols, **full_status(c)}
 
 
 @router.post("/api/control/live/stop", tags=["control"])
 async def live_stop(c: ContainerDep, _: Admin) -> dict[str, Any]:
     await c.controller.stop_live()
-    return c.controller.status()
+    return full_status(c)
 
 
 @router.get("/api/live", tags=["control"])
@@ -126,6 +133,39 @@ async def live_prices(c: ContainerDep) -> dict[str, Any]:
 async def latest_signals(c: ContainerDep) -> SignalScanOut | None:
     """The latest completed scan (null until "Analyze now" has run). Never starts a scan."""
     return c.controller.last_scan
+
+
+# ----------------------------------------------------------------------------- scalp signals, track record
+
+HorizonQuery = Annotated[str, Query(pattern=r"^(15m|1h|4h)$")]
+
+
+@router.post("/api/scalp/scan", tags=["scalp"])
+async def scalp_scan(c: ContainerDep, _: Admin, horizon: HorizonQuery = "1h") -> dict[str, Any]:
+    """Find scalp setups on the selected coins now (in the background), with a backtest per coin."""
+    started = c.scalp.start_scan(horizon)
+    return {"started": started, "status": c.scalp.status()}
+
+
+@router.get("/api/scalp", tags=["scalp"])
+async def scalp_results(c: ContainerDep, horizon: HorizonQuery = "1h") -> dict[str, Any]:
+    """The latest scalp scan for a horizon (null until one ran) and the scan status."""
+    return {"status": c.scalp.status(), "result": c.scalp.results.get(horizon)}
+
+
+@router.get("/api/scalp/{symbol}", tags=["scalp"])
+async def scalp_symbol(symbol: SymbolPath, c: ContainerDep, _: Admin, horizon: HorizonQuery = "1h") -> dict[str, Any]:
+    """Scalp analysis of one coin now, with its backtest."""
+    try:
+        return await c.scalp.analyze(symbol, horizon)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from None
+
+
+@router.get("/api/performance", tags=["signals"])
+async def performance(c: ContainerDep, days: Annotated[int, Query(ge=1, le=365)] = 90) -> dict[str, Any]:
+    """Track record: what happened after each buy signal (swing and scalp), per strategy."""
+    return await c.tracker.performance(days)
 
 
 # ----------------------------------------------------------------------------- watchlist

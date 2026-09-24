@@ -18,7 +18,7 @@ Nothing in this project promises profitability or accuracy.
 | 5 | News, sentiment, whale / on-chain | **Done** |
 | 6 | Alerts | Next |
 | 7 | OpenAI reasoning layer | Partly: AI chat assistant (read-only; cannot change signals) |
-| 8 | Signal tracking, backtesting, statistics | |
+| 8 | Signal tracking, backtesting, statistics | Partly: track record of every buy signal, per-coin backtests for scalp signals |
 | 9 | ML / statistical prediction | |
 
 ## Decision hierarchy
@@ -139,8 +139,19 @@ consistency 25% and provider health 15%. It is informational; the gate decision 
 
 Spot long only. The engine is deterministic: the same candles always give the same signal, and
 every point of the score and every limit is explained in the API and on the dashboard. The score
-ranks setups; it is **not a probability**, and there is no measured track record until signal
-tracking and backtesting arrive in Phase 8.
+ranks setups; it is **not a probability**. How the signals actually performed is measured in the
+Track record (below).
+
+**Engine audit (quant-2.1.0):** the indicator maths was re-verified (Wilder RSI/ATR/ADX, EMA,
+MACD, Bollinger, OBV against reference values; swing points only once confirmed, no repainting).
+The weak spots were in the rules, and three checks were added:
+
+* **Entry trigger** (cap at WATCH): at least 2 of 3 on 1H (close above EMA20, MACD histogram
+  rising, RSI rising). A pullback is no longer bought while 1H momentum is still falling.
+* **Bitcoin 4H trend** (cap at WATCH, altcoins only): when Bitcoin's 4H trend is down, altcoin
+  buys wait. Altcoins rarely rise against a falling Bitcoin.
+* **Order book pressure** (no STRONG BUY): sellers stacked in the book (imbalance -0.25 or lower
+  within 1%) prevent a STRONG BUY.
 
 **Strategy:** multi-timeframe trend following with pullback entries. 1D sets the primary trend,
 4H is the setup timeframe, 1H confirms momentum, 15m times the entry.
@@ -189,8 +200,8 @@ reason (for example "wait for a breakout above X" or "extended: wait for a pullb
 | Effect | Checks |
 |---|---|
 | Block (`NO TRADE`) | order book missing or invalid, spread above 30 bps, less than $25,000 depth within 1% on either side, 24h volume below $5M |
-| Cap (at most `WATCH`) | 1D or 4H trend down, net reward:risk below 1.5R, nearest resistance closer than 0.75R, stop wider than 15%, price more than 2.5 ATR above the 4H EMA20, RSI above 78 (4H) or 80 (1D), 24h move above +25%, bear or unknown market regime |
-| Downgrade (at most `BUY`) | 1D and 4H not both up, net reward:risk below 2R, resistance closer than 1R, 15m RSI above 85, 4H volatility at the 95th percentile, neutral market regime |
+| Cap (at most `WATCH`) | 1D or 4H trend down, net reward:risk below 1.5R, nearest resistance closer than 0.75R, stop wider than 15%, price more than 2.5 ATR above the 4H EMA20, RSI above 78 (4H) or 80 (1D), 24h move above +25%, bear or unknown market regime, no 1H entry trigger, Bitcoin 4H trend down (altcoins) |
+| Downgrade (at most `BUY`) | 1D and 4H not both up, net reward:risk below 2R, resistance closer than 1R, 15m RSI above 85, 4H volatility at the 95th percentile, neutral market regime, sellers dominating the order book |
 
 **Market regime:** Bitcoin's daily trend (EMA50/EMA200 and slope) plus breadth, the share of the
 universe trading above its daily EMA50. `BULL` allows every label, `NEUTRAL` at most `BUY`, `BEAR`
@@ -212,6 +223,69 @@ backtesting), and the market regime at most hourly or on change (`market_regimes
 in parallel (about 350 Binance request weight of the 6,000 per-minute limit). CoinMarketCap candle
 cross-checks stay cached per asset (30 minutes for 1H, 6 hours for 1D) under the credit pacing
 described above.
+
+## Scalp signals (15m / 1h / 4h)
+
+The Scalp signals card finds short-term spot longs for a horizon you pick, on the coins in
+"Coins to analyse". Press **Find scalps**; nothing runs in the background.
+
+| Horizon | Setup candles | Trend must be up | Must not be down | Time limit |
+|---|---|---|---|---|
+| 15 min | 5m | 15m | 1H | 30 minutes |
+| 1 hour | 15m | 1H | 4H | 2 hours |
+| 4 hours | 1H | 4H | 1D | 8 hours |
+
+**Setups** (long only): a *pullback* (uptrend, dip to the EMA20, RSI resets to 52 or lower, then
+a bullish candle closes above the previous high) or a *breakout* (close above the 20-candle
+high on 1.8x average volume after a quiet period, not overbought). Both also need Bitcoin's trend
+not down (for altcoins), the price above today's VWAP (15 min and 1 hour), room to the next swing
+high, and a stop at least 2.5x the round-trip costs away. With 0.1% fees a 15-minute scalp on
+Bitcoin rarely has enough room: the engine says "move too small for fees" instead of pretending.
+
+**Plan:** entry at the signal candle's close (buy zone up to 0.25R above), stop under the recent
+low (0.8 to 2 ATR), TP1 at 1R (or just under a closer swing high) for half, stop to break-even,
+TP2 at 2R, and a time exit. Size risks 1% of the portfolio (your risk settings).
+
+**Backtest evidence gate:** before a coin gets a label, the *same rules* are replayed over its
+recent history (4,000 setup candles: about 14 days for 15 min, 41 days for 1 hour, 166 days for 4
+hours), one trade at a time, entries at the signal close, stop counted first when a candle hits
+both, net of fees and slippage. The result decides the label:
+
+* `STRONG BUY`: at least 25 trades, expectancy +0.25R or better, profit factor 1.5+, win rate 50%+.
+* `BUY`: at least 15 trades, expectancy +0.1R or better and profit factor 1.2+; or, for a coin with
+  too few trades, the same rules across all scanned coins (40+ trades) pass (capped at `BUY`).
+* `NO TRADE`: the rules lost money on this coin (or across the coins).
+* `WATCH`: not enough evidence, the setup type alone lost, the price already ran more than 0.25R
+  above the entry, or the trend is right but no trigger yet.
+
+Live checks the history cannot contain still apply: spread, depth, 24h volume, order-book
+pressure, price versus the stop and TP1, and the entry window (2 candles). A test verifies the
+engine never uses future data: every setup found in the full history is identical when the history
+ends at that candle.
+
+`POST /api/scalp/scan?horizon=1h` (token), `GET /api/scalp?horizon=1h`, `GET /api/scalp/{symbol}?horizon=4h` (token).
+
+## Track record
+
+Every BUY and STRONG BUY (swing and scalp) is followed on the candles after it with the same
+pessimistic simulator as the backtest: stop first, half at TP1 then break-even, targets, and a
+time limit (14 days for swing signals). A signal that appears while an earlier one on the same
+coin and strategy is still running is marked SKIPPED, so one move is never counted twice. It
+uses candles the analysis already fetched, so it costs no extra API calls. The card shows win
+rate, average R, total R and profit factor per strategy for the last 90 days
+(`GET /api/performance?days=90`). This is the honest measure of accuracy: unlike a backtest,
+nothing in it was known when the rules were written.
+
+## About accuracy and "$50 a day"
+
+No indicator set can promise a win rate, and nothing here does. What this dashboard does is
+refuse trades whose own history says they lose, show the measured record of every setup, and size
+every trade so a stop costs about 1% of the portfolio. Some arithmetic for a daily target: with a
+measured expectancy of +0.2R and 1% risk per trade, each trade earns on average 0.2% of the
+portfolio; $50 a day then needs about $25,000 per trade-a-day (for example $5,000 and five good
+trades every day), and results vary a lot from day to day. Raising risk per trade to reach a
+target faster is the usual way accounts are lost. Start with small sizes, watch the Track record
+for a few weeks, and trust only what it shows.
 
 ## Manual control (Phase 3)
 
@@ -377,6 +451,10 @@ Without `ADMIN_TOKEN`, anyone who finds the URL can use those controls.
 | `GET /api/events/unlocks?refresh=true` | Upcoming token unlocks for the analysed coins (Mobula key) |
 | `GET /api/events/airdrops?refresh=true` | Airdrops (AlphaDrops key) |
 | `GET /api/chat/models` | Chat model choices and which ones your OpenAI key can use (token) |
+| `POST /api/scalp/scan?horizon=15m\|1h\|4h` (token) | Scalp scan of the selected coins, in the background |
+| `GET /api/scalp?horizon=1h` | Latest scalp scan (signals, per-coin backtest, pooled record) and scan status |
+| `GET /api/scalp/{symbol}?horizon=1h` (token) | Scalp analysis of one coin now |
+| `GET /api/performance?days=90` | Track record per strategy and the latest outcomes |
 | `POST /api/chat` | AI assistant (token); optional `model` and `reasoning_effort` |
 | `GET /api/portfolio`, `PUT /cash`, `POST/DELETE /positions`, `PUT /risk`, `POST /plan` | Portfolio, risk settings, trade plan (token) |
 | `GET /api/assets/{symbol}/analysis` | Phase 2: indicators, structure, regimes, score factors, trade plan, risk checks, full pipeline |
@@ -454,6 +532,7 @@ Portfolio > Risk settings, which are stored in the database and take precedence.
 | `CHAT_MODEL_OPTIONS` | gpt-5-mini, gpt-5, gpt-5-nano, gpt-4.1, gpt-4.1-mini, gpt-4o, gpt-4o-mini, o4-mini | models in the chat picker |
 | `MOBULA_API_KEY` / `ALPHADROPS_API_KEY` | unset | token unlocks / airdrops |
 | `EVENTS_CACHE_SECONDS` / `UNLOCK_WINDOW_DAYS` | 21600 / 30 | unlock and airdrop cadence, unlock window |
+| `SCALP_SLIPPAGE_PCT` / `SCALP_MIN_RISK_COST_MULTIPLE` / `SCALP_MIN_TRADES` | 0.02 / 2.5 / 15 | scalp costs, fee filter, evidence minimum |
 | `REGIME_CACHE_SECONDS` | 600 | market regime refresh |
 | `CANDLE_FETCH_LIMIT` / `CANDLE_FETCH_LIMIT_LONG` | 500 / 1000 | candles per request (5m-1H / 4H-1D) |
 | `SIGNAL_PERSIST_ENABLED` / `FEATURE_PERSIST_TIMEFRAMES` | true / 1h,4h,1d | history storage |
@@ -534,4 +613,6 @@ Phase 3/4 services: `control.py` (manual scans, schedule, live prices), `watchli
 `news.py`, `chat.py` and `assistant.py` (OpenAI chat and its context), `portfolio.py`;
 Phase 5: `onchain.py` (network data, whales, stablecoins), `sentiment.py` (market mood),
 `events.py` (token unlocks, airdrops), `selection.py` (coins to analyse);
+Phase 6: `analysis/scalp.py` (scalp rules and backtest), `analysis/trade_sim.py` (shared trade
+simulator), `services/scalp.py`, `services/outcomes.py` (track record);
 routes in `api/controls.py`.

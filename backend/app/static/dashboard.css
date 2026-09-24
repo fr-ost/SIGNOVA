@@ -405,6 +405,8 @@ label.toggle { display: inline-flex; align-items: center; gap: 6px; cursor: poin
   --f-mood: #d9437a;
   --f-events: #0a8fb8;
   --f-news: #e2641c;
+  --f-scalp: #4c9a0e;
+  --f-record: #b7791f;
   --shadow: 0 1px 2px rgba(15, 15, 20, 0.04), 0 10px 28px -16px rgba(15, 15, 20, 0.18);
   --shadow-hover: 0 2px 4px rgba(15, 15, 20, 0.05), 0 18px 40px -18px rgba(15, 15, 20, 0.28);
   --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
@@ -414,6 +416,7 @@ label.toggle { display: inline-flex; align-items: center; gap: 6px; cursor: poin
   :root:not([data-theme="light"]) {
     --f-control: #4b93ec; --f-signals: #9a78f5; --f-portfolio: #2fc07e; --f-market: #27b4c1; --f-providers: #94a3b8;
     --f-chat: #8286f7; --f-watch: #e8b33a; --f-mood: #ef6b9b; --f-events: #34b3dc; --f-news: #f28544;
+    --f-scalp: #86cf3a; --f-record: #e0a84a;
     --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 12px 30px -18px rgba(0, 0, 0, 0.7);
     --shadow-hover: 0 2px 4px rgba(0, 0, 0, 0.35), 0 20px 44px -18px rgba(0, 0, 0, 0.85);
     --glow: rgba(75, 147, 236, 0.10);
@@ -422,6 +425,7 @@ label.toggle { display: inline-flex; align-items: center; gap: 6px; cursor: poin
 :root[data-theme="dark"] {
   --f-control: #4b93ec; --f-signals: #9a78f5; --f-portfolio: #2fc07e; --f-market: #27b4c1; --f-providers: #94a3b8;
   --f-chat: #8286f7; --f-watch: #e8b33a; --f-mood: #ef6b9b; --f-events: #34b3dc; --f-news: #f28544;
+  --f-scalp: #86cf3a; --f-record: #e0a84a;
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 12px 30px -18px rgba(0, 0, 0, 0.7);
   --shadow-hover: 0 2px 4px rgba(0, 0, 0, 0.35), 0 20px 44px -18px rgba(0, 0, 0, 0.85);
   --glow: rgba(75, 147, 236, 0.10);
@@ -466,6 +470,8 @@ body {
 .card[data-feature="mood"] { --feat: var(--f-mood); }
 .card[data-feature="events"] { --feat: var(--f-events); }
 .card[data-feature="news"] { --feat: var(--f-news); }
+.card[data-feature="scalp"] { --feat: var(--f-scalp); }
+.card[data-feature="record"] { --feat: var(--f-record); }
 .card[data-feature]::before {
   content: ""; position: absolute; inset: 0 0 auto 0; height: 3px;
   background: linear-gradient(90deg, var(--feat), color-mix(in srgb, var(--feat) 25%, transparent));
@@ -607,3 +613,23 @@ dialog#detail[open]::backdrop { animation: fade 0.3s ease both; }
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
 .card[data-feature] > .card-head { align-items: center; }
+
+/* scalp signals and track record (Phase 6) */
+.pad-row { padding: 0 16px; }
+.progress.inset { margin: 10px 0 8px; }
+.segmented { display: inline-flex; padding: 3px; gap: 2px; border-radius: 10px; background: var(--surface-2); }
+.segmented button { border: 0; background: none; padding: 5px 12px; font-size: 13px; color: var(--muted); border-radius: 8px; }
+.segmented button[aria-checked="true"] { background: var(--surface); color: var(--ink); font-weight: 600; box-shadow: var(--shadow); }
+.segmented button[aria-checked="true"] { outline: 1px solid color-mix(in srgb, var(--f-scalp) 45%, transparent); }
+#scalp-scan { background: linear-gradient(135deg, var(--f-scalp), color-mix(in srgb, var(--f-scalp) 55%, var(--f-market))); }
+#scalp-progress { background: linear-gradient(90deg, var(--f-scalp), var(--f-market), var(--f-scalp)); background-size: 200% 100%; }
+tbody tr.open { background: color-mix(in srgb, var(--f-scalp) 8%, var(--surface)); }
+tr.detail-row > td { padding: 0; border-top: 0; }
+.scalp-detail { padding: 6px 0 12px; border-left: 3px solid var(--f-scalp); background: color-mix(in srgb, var(--f-scalp) 4%, var(--surface)); animation: rise 0.3s var(--ease) both; }
+.scalp-detail .plain-list { padding-left: 18px; }
+.expected { color: var(--ink-2); }
+.expected strong { color: var(--ink); }
+.recent-trades { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0 0 12px; }
+.r-chip { font-size: 12px; font-variant-numeric: tabular-nums; padding: 2px 8px; border-radius: 999px; background: var(--surface-2); }
+.r-chip.pos { color: var(--up); background: color-mix(in srgb, var(--up) 12%, transparent); }
+.r-chip.neg { color: var(--down); background: color-mix(in srgb, var(--down) 12%, transparent); }

@@ -49,6 +49,9 @@ from app.services.control import AnalysisController
 from app.services.news import NewsService
 from app.services.onchain import OnChainService
 from app.services.events import EventsService
+from app.analysis.engine import STRATEGY
+from app.services.outcomes import OutcomeTracker
+from app.services.scalp import ScalpService
 from app.services.selection import ScanSelectionService
 from app.services.sentiment import SentimentService
 from app.services.portfolio import PortfolioService
@@ -101,6 +104,8 @@ class Container:
     sentiment: SentimentService
     selection: ScanSelectionService
     events: EventsService
+    scalp: ScalpService
+    tracker: OutcomeTracker
     stream: BinanceStreamManager | None = None
     live_prices: LivePriceBook = field(default_factory=LivePriceBook)
     cmc: CoinMarketCapClient | None = None
@@ -121,6 +126,7 @@ class Container:
                 log.info("CoinMarketCap access mode", extra={"mode": self.cmc.mode})
 
     async def aclose(self) -> None:
+        await self.scalp.stop()
         await self.controller.aclose()
         if self.stream is not None and self.stream.running:
             await self.stream.stop()
@@ -307,6 +313,22 @@ def build_container(
             if isinstance(result, Exception):
                 log.warning("pre-scan context refresh failed", extra={"error": str(result)})
 
+    tracker = OutcomeTracker(
+        session_factory,
+        cost_pct=lambda strategy: analysis.risk_params.round_trip_cost_pct if strategy == STRATEGY
+        else 2.0 * (analysis.risk_params.fee_pct + settings.scalp_slippage_pct),
+    )
+    analysis.on_candles = tracker.update
+    scalp = ScalpService(
+        settings, universe, assets, router,
+        risk_params=lambda: analysis.risk_params,
+        selection_filter=selection.filter,
+        notes_for=lambda symbol: [f"sentiment: {n}" for n in (getattr(sentiment.for_asset(symbol), "notes", None) or [])]
+        + events.notes_for(symbol),
+        equity=portfolio.equity_at_cost,
+        session_factory=session_factory,
+        on_candles=tracker.update,
+    )
     analysis.sentiment_for = sentiment.for_asset
     analysis.event_notes = events.notes_for
     analysis.before_scan = before_scan
@@ -339,6 +361,8 @@ def build_container(
         sentiment=sentiment,
         selection=selection,
         events=events,
+        scalp=scalp,
+        tracker=tracker,
         stream=stream,
         live_prices=live_prices,
         cmc=cmc_client,

@@ -26,6 +26,7 @@ from app.analysis.scoring import SignalParams
 from app.config import Settings
 from app.core.enums import SignalLabel, Timeframe
 from app.core.timeutil import utcnow
+from app.data.normalization.schemas import Candle
 from app.risk.params import RiskParams
 from app.schemas.api import (
     AnalysisOut,
@@ -107,6 +108,8 @@ def regime_out(m: MarketRegimeResult) -> MarketRegimeOut:
         flags=list(m.flags),
         reasons=list(m.reasons),
         errors=list(m.errors),
+        btc_trend_4h=m.btc_trend_4h,
+        btc_rsi_4h=m.btc_rsi_4h,
     )
 
 
@@ -270,6 +273,8 @@ class AnalysisService:
         self.scan_filter: Callable[[list[UniverseAsset]], list[UniverseAsset]] | None = None
         # risk notes from scheduled events (token unlocks), read from a cache; never fetches
         self.event_notes: Callable[[str], list[str]] | None = None
+        # the track record follows earlier signals with the candles this analysis fetched
+        self.on_candles: Callable[[str, dict[Timeframe, list[Candle]]], Awaitable[Any]] | None = None
         self.before_scan: Callable[[], Awaitable[Any]] | None = None
 
     @property
@@ -304,7 +309,13 @@ class AnalysisService:
             result.risks.extend(self.event_notes(result.symbol))
         if result.signal in (SignalLabel.BUY, SignalLabel.STRONG_BUY):
             log.info("signal", extra={"symbol": result.symbol, "signal": result.signal.value, "score": result.score})
-        return analysis_out(result, await self._persist(result), asdict(sentiment) if sentiment is not None else None)
+        persisted = await self._persist(result)
+        if self.on_candles is not None and Timeframe.H1 in collection.closed:
+            try:
+                await self.on_candles(result.symbol, {Timeframe.H1: collection.closed[Timeframe.H1]})
+            except Exception:  # the track record must never break an analysis
+                log.exception("track record update failed", extra={"symbol": result.symbol})
+        return analysis_out(result, persisted, asdict(sentiment) if sentiment is not None else None)
 
     @staticmethod
     def _inputs(c: AssetCollection, market: MarketRegimeResult) -> AnalysisInputs:
