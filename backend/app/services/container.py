@@ -14,7 +14,7 @@ import httpx
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.config import Settings
-from app.core.enums import ProcessingState
+from app.core.enums import ProcessingState, SignalLabel
 from app.core.timeutil import utcnow
 from app.data.adapters.base import (
     AltcoinSeasonAdapter,
@@ -51,6 +51,9 @@ from app.services.news import NewsService
 from app.services.onchain import OnChainService
 from app.services.events import EventsService
 from app.services.killswitch import KillSwitch
+from app.services.ai_review import AIReviewService
+from app.services.lab import LabService
+from app.services.settings_store import SettingsStore
 from app.analysis.engine import STRATEGY
 from app.services.outcomes import OutcomeTracker
 from app.services.scalp import ScalpService
@@ -109,6 +112,9 @@ class Container:
     scalp: ScalpService
     tracker: OutcomeTracker
     kill: KillSwitch
+    lab: LabService
+    store: SettingsStore
+    ai_review: AIReviewService
     stream: BinanceStreamManager | None = None
     live_prices: LivePriceBook = field(default_factory=LivePriceBook)
     cmc: CoinMarketCapClient | None = None
@@ -119,6 +125,9 @@ class Container:
         await self.kill.load()  # first: an engaged emergency stop keeps the schedule off
         await self.watchlist.load()
         await self.selection.load()
+        await self.scalp.load()
+        await self.lab.load()
+        await self.ai_review.load()
         await self.portfolio.load()
         self.controller.start_background()
         if self.cmc is not None and self.cmc.has_key and not self.kill.active:
@@ -132,6 +141,8 @@ class Container:
     async def emergency_stop(self, reason: str | None = None) -> None:
         """Halt everything: scans, schedule, lab, live prices; refuse outside calls until resumed."""
         await self.kill.engage(reason)  # first, so nothing new can start while we stop the rest
+        await self.ai_review.stop()
+        await self.lab.stop()
         await self.scalp.stop()
         await self.controller.stop()
         self.state.processing_state = ProcessingState.EMERGENCY_STOP
@@ -140,6 +151,8 @@ class Container:
         await self.kill.release()
 
     async def aclose(self) -> None:
+        await self.ai_review.stop()
+        await self.lab.stop()
         await self.scalp.stop()
         await self.controller.aclose()
         if self.stream is not None and self.stream.running:
@@ -148,6 +161,54 @@ class Container:
             await self.http.aclose()
         if self.engine is not None:
             await self.engine.dispose()
+
+
+def wire_ai_review(review: AIReviewService, controller: AnalysisController, analysis: AnalysisService,
+                   scalp: ScalpService) -> None:
+    """Show verdicts on the signals they reviewed, and review new buys automatically when enabled."""
+    from app.services.ai_review import capped_label
+
+    def apply(result: dict[str, Any]) -> None:
+        symbol, horizon, capped = result["symbol"], result.get("horizon") or "", review.caps(result)
+        if result["kind"] == "swing":
+            cached = analysis.cached(symbol)
+            if cached is not None:
+                cached.ai_review = result
+                if capped and cached.signal.value in ("BUY", "STRONG BUY"):
+                    cached.signal = SignalLabel.WATCH
+                    cached.reasons = [f"AI reviewer rejected it: {result['summary']}", *cached.reasons]
+            scan = controller.last_scan
+            for row in scan.signals if scan else []:
+                if row.symbol == symbol:
+                    row.ai_review = result
+                    if capped and row.signal.value in ("BUY", "STRONG BUY"):
+                        row.signal = SignalLabel.WATCH
+                        row.reasons = [f"AI reviewer rejected it: {result['summary']}", *row.reasons]
+        else:
+            for sig in (scalp.results.get(horizon) or {}).get("signals", []):
+                if sig["symbol"] == symbol:
+                    sig["ai_review"] = result
+                    shown = capped_label(sig["signal"], result, review)
+                    if shown != sig["signal"]:
+                        sig["signal"] = shown
+                        sig["reasons"] = [f"AI reviewer rejected it: {result['summary']}", *sig["reasons"]]
+
+    review.on_review = apply
+
+    def after_swing(scan: Any) -> None:
+        buys = [row for row in scan.signals if row.signal.value in ("BUY", "STRONG BUY")]
+        items = []
+        for row in buys:
+            cached = analysis.cached(row.symbol)
+            items.append(("swing", row.symbol, "", cached.model_dump(mode="json") if cached else row.model_dump(mode="json")))
+        review.schedule_auto(items)
+
+    def after_scalp(horizon: str, result: dict[str, Any]) -> None:
+        review.schedule_auto([("scalp", s["symbol"], horizon, s) for s in result["signals"]
+                              if s["signal"] in ("BUY", "STRONG BUY")])
+
+    controller.after_scan = after_swing
+    scalp.after_scan = after_scalp
 
 
 def build_container(
@@ -327,6 +388,7 @@ def build_container(
             if isinstance(result, Exception):
                 log.warning("pre-scan context refresh failed", extra={"error": str(result)})
 
+    store = SettingsStore(session_factory)
     tracker = OutcomeTracker(
         session_factory,
         cost_pct=lambda strategy: analysis.risk_params.round_trip_cost_pct if strategy == STRATEGY
@@ -343,8 +405,11 @@ def build_container(
         session_factory=session_factory,
         on_candles=tracker.update,
         blocked=lambda: state.emergency_stop,
+        store=store,
     )
     kill = KillSwitch(state, session_factory)
+    lab = LabService(universe, scalp, store, selection_filter=selection.filter, blocked=lambda: state.emergency_stop,
+                     concurrency=settings.signal_scan_concurrency)
     analysis.sentiment_for = sentiment.for_asset
     analysis.event_notes = events.notes_for
     analysis.before_scan = before_scan
@@ -353,6 +418,8 @@ def build_container(
         http,
         lambda symbol: chat_context(analysis, controller, news, portfolio, watchlist, symbol, sentiment, onchain, events),
     )
+    ai_review = AIReviewService(chat, store, session_factory, blocked=lambda: state.emergency_stop)
+    wire_ai_review(ai_review, controller, analysis, scalp)
     return Container(
         settings=settings,
         http=http,
@@ -380,6 +447,9 @@ def build_container(
         scalp=scalp,
         tracker=tracker,
         kill=kill,
+        lab=lab,
+        store=store,
+        ai_review=ai_review,
         stream=stream,
         live_prices=live_prices,
         cmc=cmc_client,

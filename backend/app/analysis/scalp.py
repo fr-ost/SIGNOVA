@@ -35,7 +35,7 @@ import bisect
 import math
 import statistics
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 
 from app.analysis import indicators as ind
@@ -281,6 +281,23 @@ class Candidate:
     risk_pct: float
     atr: float
     reasons: list[str] = field(default_factory=list)
+    level: float | None = None  # nearest swing high above the entry (caps TP1)
+
+
+def targets_for(entry: float, stop: float, atr: float, level: float | None, p: ScalpParams) -> tuple[float, float]:
+    """TP1 and TP2 for an entry and stop under the exit rules in `p`."""
+    distance = entry - stop
+    tp1 = entry + p.tp1_r * distance
+    if level is not None and level - 0.1 * atr < tp1:
+        tp1 = max(level - 0.1 * atr, entry + p.min_tp1_r * distance)  # take the first profit under the swing high
+    tp2 = max(entry + p.tp2_r * distance, tp1 + 0.1 * distance)
+    return tp1, tp2
+
+
+def retarget(c: Candidate, p: ScalpParams) -> Candidate:
+    """The same setup with the targets of other exit rules (the strategy lab tries several)."""
+    tp1, tp2 = targets_for(c.entry, c.stop, c.atr, c.level, p)
+    return replace(c, tp1=tp1, tp2=tp2)
 
 
 def _nearest_high(s: ScalpSeries, i: int, above: float, lookback: int = 150) -> float | None:
@@ -391,9 +408,7 @@ def evaluate_at(
     level = _nearest_high(s, i, close)
     if level is not None and level - close < p.min_room_r * distance:
         return no(f"resistance {_fmt(level)} only {(level - close) / distance:.2f}R above: no room")
-    tp1 = close + p.tp1_r * distance
-    if level is not None and level - 0.1 * a < tp1:
-        tp1 = max(level - 0.1 * a, close + p.min_tp1_r * distance)  # take the first profit under the swing high
+    tp1, tp2 = targets_for(close, stop, a, level, p)
     if prof.use_vwap and vw is not None:
         reasons.append(f"above today's VWAP {_fmt(vw)}")
     reasons.append(f"{prof.trend.label} trend up, {prof.filter.label} not down"
@@ -401,7 +416,7 @@ def evaluate_at(
     reasons.append("room to the next swing high: " + (f"{(level - close) / distance:.1f}R" if level else "none overhead"))
     cand = Candidate(
         kind=kind, index=i, time=s.candles[i].close_time, entry=close, stop=stop,
-        tp1=tp1, tp2=close + p.tp2_r * distance, risk_pct=risk_pct, atr=a, reasons=reasons,
+        tp1=tp1, tp2=tp2, risk_pct=risk_pct, atr=a, reasons=reasons, level=level,
     )
     return cand, why
 

@@ -67,6 +67,7 @@ class AnalysisController:
         self._next_auto_at: datetime | None = None
         self._live_symbols: dict[str, str] = {}  # exchange symbol -> base asset
         self._stopping = False
+        self.after_scan: Any = None  # called with the finished scan (automatic AI review)
         self._initial_auto = auto_minutes
 
     # ------------------------------------------------------------------ scans
@@ -102,6 +103,11 @@ class AnalysisController:
                 on_start=on_start, on_progress=on_progress, should_stop=lambda: self._stopping
             )
             progress.outcome = "completed"
+            if self.after_scan is not None:
+                try:
+                    self.after_scan(self.last_scan)
+                except Exception:
+                    log.exception("after-scan hook failed")
         except ScanStopped:
             progress.outcome = "stopped"
         except asyncio.CancelledError:

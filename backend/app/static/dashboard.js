@@ -490,7 +490,7 @@
           h("span", { class: "muted small" }, row.name, row.watchlist ? h("span", { class: "watch-tag", text: "watchlist" }) : null),
         ),
       ),
-      h("td", {}, signalBadge(row.signal)),
+      h("td", {}, signalBadge(row.signal), aiChip(row.ai_review)),
       h("td", {}, h("div", { class: "score-cell" }, h("span", { class: "num", text: row.score }), meter(row.score))),
       h("td", { class: "hide-sm", text: humanize(row.trend) }),
       h("td", { class: planCls, title: actionable ? null : "WATCH plan: not a buy signal" },
@@ -712,6 +712,14 @@
   const outcomeLabel = { PASS: "Pass", CAP: "Caps at Watch", DOWNGRADE: "Caps at Buy", BLOCK: "Blocks", NOT_RUN: "Not run" };
   const severityOutcome = { block: "BLOCK", cap: "CAP", downgrade: "DOWNGRADE" };
 
+  function swingReview(a) {
+    const box = h("div", {}, a.ai_review ? aiReviewBlock(a.ai_review) : null);
+    const btn = h("button", { type: "button", class: "small", text: a.ai_review ? "Review again with AI" : "AI review of this signal",
+      title: "Ask the OpenAI model for a second opinion (uses your OpenAI credits; it can only lower the signal)" });
+    btn.addEventListener("click", () => requestReview("swing", a.symbol, null, box, btn));
+    return h("div", { class: "pad review-row-wrap" }, h("div", { class: "review-row" }, btn), box);
+  }
+
   function renderAnalysis(a) {
     const regimeByTf = Object.fromEntries(a.regimes.map((r) => [r.timeframe, r]));
     const parts = [];
@@ -727,6 +735,7 @@
           h("span", { class: "muted small", text: `Trend ${humanize(a.trend).toLowerCase()} · ${a.setup_timeframe} setup · ${humanize(a.market_regime.regime).toLowerCase()} market` }),
         ),
         h("p", { class: "signal-summary", text: a.summary }),
+        swingReview(a),
       ),
     );
     parts.push(chartCard(a.symbol, a.plan));
@@ -1085,8 +1094,9 @@
       if (unlocksLoaded) refreshEvents(false, true);
     }
     if (s.scalp) renderScalpStatus(s.scalp);
+    if (s.lab) renderLabStatus(s.lab);
     applyEmergency(s.emergency_stop);
-    const scalpRunning = s.scalp && Object.values(s.scalp).some((x) => x.running);
+    const scalpRunning = (s.scalp && Object.values(s.scalp).some((x) => x.running)) || (s.lab && Object.values(s.lab).some((x) => x.running));
     scheduleControl(s.scan.running || scalpRunning ? 2000 : 30000);
     if (s.live.running && !liveTimer) liveTimer = setInterval(refreshLive, 5000);
     if (!s.live.running && liveTimer) {
@@ -1387,6 +1397,13 @@
   function scalpDetail(sig) {
     const bt = sig.backtest;
     const parts = [];
+    const reviewBox = h("div", { class: "pad" }, sig.ai_review ? aiReviewBlock(sig.ai_review) : null);
+    const reviewBtn = h("button", { type: "button", class: "small", text: sig.ai_review ? "Review again with AI" : "AI review",
+      title: "Ask the OpenAI model for a second opinion on this setup (uses your OpenAI credits)" });
+    reviewBtn.addEventListener("click", (e) => { e.stopPropagation(); requestReview("scalp", sig.symbol, sig.horizon, reviewBox, reviewBtn); });
+    parts.push(h("div", { class: "pad review-row" }, reviewBtn, sig.ml && sig.ml.validated
+      ? h("span", { class: "small muted", text: `statistical filter: ${Math.round(sig.ml.probability * 100)}% win probability (threshold ${Math.round(sig.ml.threshold * 100)}%)` })
+      : null), reviewBox);
     if (!sig.plan && sig.pending) {
       const w = sig.pending;
       parts.push(h("div", { class: "pad conditional" },
@@ -1467,7 +1484,7 @@
       "tr",
       { class: `clickable${open ? " open" : ""}${w ? " waiting" : ""}`, onclick: toggle, "aria-expanded": open ? "true" : "false" },
       h("td", {}, h("div", { class: "asset-cell" }, h("strong", { text: sig.symbol }), h("span", { class: "muted small", text: sig.name }))),
-      h("td", {}, signalBadge(sig.signal, null), sig.status ? h("div", { class: "muted small status-line", text: sig.status }) : null),
+      h("td", {}, signalBadge(sig.signal, null), sig.status ? h("div", { class: "muted small status-line", text: sig.status }) : null, aiChip(sig.ai_review)),
       h("td", { class: "hide-sm", text: sig.setup ? humanize(sig.setup) : DASH }),
       h("td", { class: planCls }, ...entryCell),
       h("td", { class: planCls }, ...(p ? level(p.stop, `−${p.risk_pct.toFixed(2)}%`) : w ? level(w.stop, `−${w.risk_pct.toFixed(2)}%`) : [DASH])),
@@ -1591,6 +1608,12 @@
             h("td", { class: "num", title: st.skipped ? `${st.skipped} overlapping signals not counted` : null, text: st.open }),
           )),
         ),
+        d.by_ai && d.by_ai.some((r) => r.verdict !== "not reviewed") ? h("div", { class: "pad" },
+          h("strong", { class: "small", text: "By AI verdict (does the reviewer help?)" }),
+          table([["AI verdict"], ["Closed", "num"], ["Win rate", "num"], ["Avg", "num"]],
+            d.by_ai.map((r) => h("tr", {}, h("td", { text: humanize(r.verdict) }), h("td", { class: "num", text: r.closed }),
+              h("td", { class: "num", text: `${Math.round(r.win_rate)}%` }),
+              h("td", { class: `num ${r.avg_r > 0 ? "pnl-up" : r.avg_r < 0 ? "pnl-down" : ""}`, text: fmtR(r.avg_r) }))))) : null,
         d.recent.length ? h("div", { class: "pad recent-trades" },
           h("span", { class: "small muted", text: "Latest: " }),
           ...d.recent.slice(0, 12).map((t) => h("span", {
@@ -1602,6 +1625,325 @@
       );
     } catch (err) {
       body.replaceChildren(h("p", { class: "muted small pad", text: `Track record unavailable: ${err.message}` }));
+    }
+  }
+
+  // ---------------------------------------------------------------- strategy lab (phases 8 and 9)
+
+  let labHorizon = "1h";
+  const labSeen = {};
+
+  function niceStep(span, target = 4) {
+    const raw = span / target;
+    const pow = Math.pow(10, Math.floor(Math.log10(raw || 1)));
+    const m = raw / pow;
+    return (m >= 5 ? 10 : m >= 2 ? 5 : m >= 1 ? 2 : 1) * pow;
+  }
+
+  function equityChart(points, splitTime) {
+    if (!points || points.length < 2) return h("p", { class: "muted small pad", text: "Not enough trades for an equity curve." });
+    const W = 760, H = 220, padL = 10, padR = 58, padT = 14, padB = 24;
+    const t = points.map((p) => new Date(p.time).getTime());
+    const t0 = t[0], t1 = t[t.length - 1] || t0 + 1;
+    let lo = Math.min(0, ...points.map((p) => p.r)), hi = Math.max(0, ...points.map((p) => p.r));
+    const step = niceStep(hi - lo || 1);
+    lo = Math.floor(lo / step) * step; hi = Math.ceil(hi / step) * step;
+    if (hi === lo) hi = lo + step;
+    const x = (ms) => padL + ((ms - t0) / (t1 - t0 || 1)) * (W - padL - padR);
+    const y = (v) => padT + ((hi - v) / (hi - lo)) * (H - padT - padB);
+    const ticks = [];
+    for (let v = lo; v <= hi + 1e-9; v += step) {
+      ticks.push(s("line", { x1: padL, x2: W - padR, y1: y(v), y2: y(v), stroke: "var(--grid)", "stroke-width": 1 }),
+        s("text", { x: W - padR + 6, y: y(v) + 4, "font-size": 11, fill: "var(--muted)" }, document.createTextNode(`${v > 0 ? "+" : v < 0 ? "−" : ""}${Math.abs(v).toFixed(step < 1 ? 1 : 0)}R`)));
+    }
+    const pts = points.map((p, i) => `${x(t[i]).toFixed(1)},${y(p.r).toFixed(1)}`);
+    const area = s("polygon", { points: `${x(t0).toFixed(1)},${y(0)} ${pts.join(" ")} ${x(t1).toFixed(1)},${y(0)}`, fill: "var(--viz-pos)", opacity: 0.1 });
+    const line = s("polyline", { points: pts.join(" "), fill: "none", stroke: "var(--viz-pos)", "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" });
+    const zero = s("line", { x1: padL, x2: W - padR, y1: y(0), y2: y(0), stroke: "var(--muted)", "stroke-width": 1 });
+    const marks = [];
+    if (splitTime) {
+      const sx = x(new Date(splitTime).getTime());
+      if (sx > padL && sx < W - padR) {
+        marks.push(s("line", { x1: sx, x2: sx, y1: padT, y2: H - padB, stroke: "var(--muted)", "stroke-width": 1 }),
+          s("text", { x: sx - 6, y: padT + 10, "font-size": 11, fill: "var(--muted)", "text-anchor": "end" }, document.createTextNode("older 70% (chooses)")),
+          s("text", { x: sx + 6, y: padT + 10, "font-size": 11, fill: "var(--muted)" }, document.createTextNode("newer 30% (checks)")));
+      }
+    }
+    const last = points[points.length - 1];
+    const endDot = s("circle", { cx: x(t1), cy: y(last.r), r: 4, fill: "var(--viz-pos)", stroke: "var(--surface)", "stroke-width": 2 });
+    const cross = s("line", { y1: padT, y2: H - padB, stroke: "var(--muted)", "stroke-width": 1, opacity: 0, "pointer-events": "none" });
+    const dot = s("circle", { r: 4, fill: "var(--viz-pos)", stroke: "var(--surface)", "stroke-width": 2, opacity: 0, "pointer-events": "none" });
+    const svg = s("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", tabindex: 0,
+      "aria-label": `Cumulative result in R over ${points.length} points, ending at ${last.r.toFixed(1)}R` },
+      ticks, area, zero, marks, line, endDot, cross, dot);
+    const tip = h("div", { class: "chart-tip", text: `Ends at ${fmtR(last.r)} after all trades. Hover for the running total.` });
+    const show = (i) => {
+      const p = points[i];
+      cross.setAttribute("x1", x(t[i])); cross.setAttribute("x2", x(t[i])); cross.setAttribute("opacity", 0.6);
+      dot.setAttribute("cx", x(t[i])); dot.setAttribute("cy", y(p.r)); dot.setAttribute("opacity", 1);
+      tip.textContent = `${fmtR(p.r)} total by ${new Date(p.time).toLocaleString()}`;
+    };
+    svg.addEventListener("mousemove", (ev) => {
+      const rect = svg.getBoundingClientRect();
+      const ms = t0 + (((ev.clientX - rect.left) / rect.width) * W - padL) / (W - padL - padR) * (t1 - t0);
+      let best = 0;
+      for (let i = 1; i < t.length; i++) if (Math.abs(t[i] - ms) < Math.abs(t[best] - ms)) best = i;
+      show(best);
+    });
+    svg.addEventListener("focus", () => show(points.length - 1));
+    svg.addEventListener("mouseleave", () => { cross.setAttribute("opacity", 0); dot.setAttribute("opacity", 0); });
+    return h("div", { class: "lab-chart" }, svg, tip);
+  }
+
+  function barPath(x, w, yBase, yTip, r = 4) {
+    const up = yTip < yBase;
+    const hgt = Math.abs(yBase - yTip);
+    const rr = Math.min(r, hgt, w / 2);
+    if (hgt < 0.5) return `M${x},${yBase}h${w}`;
+    return up
+      ? `M${x},${yBase}V${yTip + rr}Q${x},${yTip} ${x + rr},${yTip}H${x + w - rr}Q${x + w},${yTip} ${x + w},${yTip + rr}V${yBase}Z`
+      : `M${x},${yBase}V${yTip - rr}Q${x},${yTip} ${x + rr},${yTip}H${x + w - rr}Q${x + w},${yTip} ${x + w},${yTip - rr}V${yBase}Z`;
+  }
+
+  function hourChart(byHour) {
+    const keys = Object.keys(byHour || {}).sort();
+    if (!keys.length) return null;
+    const W = 760, H = 180, padL = 10, padR = 58, padT = 18, padB = 26;
+    const vals = keys.map((k) => byHour[k].expectancy_r ?? 0);
+    let lo = Math.min(0, ...vals), hi = Math.max(0, ...vals);
+    const step = niceStep(hi - lo || 1, 3);
+    lo = Math.floor(lo / step) * step; hi = Math.ceil(hi / step) * step;
+    if (hi === lo) hi = lo + step;
+    const y = (v) => padT + ((hi - v) / (hi - lo)) * (H - padT - padB);
+    const band = (W - padL - padR) / keys.length;
+    const bw = Math.min(24, band * 0.5);
+    const tip = h("div", { class: "chart-tip", text: "Average result per trade by the hour it started (UTC). Hover a bar." });
+    const grid = [];
+    for (let v = lo; v <= hi + 1e-9; v += step) {
+      grid.push(s("line", { x1: padL, x2: W - padR, y1: y(v), y2: y(v), stroke: "var(--grid)", "stroke-width": 1 }),
+        s("text", { x: W - padR + 6, y: y(v) + 4, "font-size": 11, fill: "var(--muted)" }, document.createTextNode(`${v > 0 ? "+" : v < 0 ? "−" : ""}${Math.abs(v).toFixed(step < 1 ? 1 : 0)}R`)));
+    }
+    const bars = keys.map((k, i) => {
+      const st = byHour[k];
+      const v = st.expectancy_r ?? 0;
+      const cx = padL + band * i + band / 2;
+      const bar = s("path", { d: barPath(cx - bw / 2, bw, y(0), y(v)), fill: v >= 0 ? "var(--viz-pos)" : "var(--viz-neg)", class: "viz-bar" });
+      const label = s("text", { x: cx, y: v >= 0 ? y(v) - 5 : y(v) + 13, "font-size": 11, fill: "var(--ink-2)", "text-anchor": "middle" },
+        document.createTextNode(fmtR(v)));
+      const xl = s("text", { x: cx, y: H - 8, "font-size": 11, fill: "var(--muted)", "text-anchor": "middle" }, document.createTextNode(k));
+      const hit = s("rect", { x: cx - band / 2, y: padT, width: band, height: H - padT - padB, fill: "transparent", tabindex: 0 });
+      const describe = () => {
+        bar.classList.add("hover");
+        tip.textContent = `${k} UTC: ${fmtR(v)} per trade over ${st.trades} trades, ${Math.round(st.win_rate ?? 0)}% winners`;
+      };
+      hit.addEventListener("mousemove", describe);
+      hit.addEventListener("focus", describe);
+      hit.addEventListener("mouseleave", () => bar.classList.remove("hover"));
+      hit.addEventListener("blur", () => bar.classList.remove("hover"));
+      return s("g", {}, bar, label, xl, hit);
+    });
+    const zero = s("line", { x1: padL, x2: W - padR, y1: y(0), y2: y(0), stroke: "var(--muted)", "stroke-width": 1 });
+    const svg = s("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Average result per trade by starting hour (UTC)" }, grid, zero, bars);
+    return h("div", { class: "lab-chart" }, svg, tip);
+  }
+
+  function statsTable(groups, label) {
+    const rows = Object.entries(groups || {});
+    if (!rows.length) return null;
+    return table(
+      [[label], ["Trades", "num"], ["Win rate", "num"], ["Avg", "num"], ["Total", "num hide-sm"]],
+      rows.map(([k, st]) => h("tr", {},
+        h("td", { text: k }),
+        h("td", { class: "num", text: st.trades }),
+        h("td", { class: "num", text: st.win_rate == null ? DASH : `${Math.round(st.win_rate)}%` }),
+        h("td", { class: `num ${st.expectancy_r > 0 ? "pnl-up" : st.expectancy_r < 0 ? "pnl-down" : ""}`, text: fmtR(st.expectancy_r) }),
+        h("td", { class: "num hide-sm", text: fmtR(st.total_r) }))),
+    );
+  }
+
+  function splitCell(st) {
+    if (!st || !st.trades) return [DASH];
+    return [fmtR(st.expectancy_r), h("div", { class: "muted small", text: `${st.trades} tr · ${Math.round(st.win_rate ?? 0)}%` })];
+  }
+
+  function mlBlock(view) {
+    const m = view.model;
+    if (!m) return h("p", { class: "muted small pad", text: "Statistical filter: not trained yet (run the lab)." });
+    const mt = m.metrics || {};
+    const fmt2 = (v) => (v == null ? DASH : v.toFixed(2));
+    const toggle = h("input", { type: "checkbox", checked: view.ml_enabled ? true : null });
+    toggle.addEventListener("change", async () => {
+      try { renderLab(await api(`/api/ml?horizon=${labHorizon}`, { method: "PUT", body: { enabled: toggle.checked } }).then(() => getJSON(`/api/lab?horizon=${labHorizon}`))); }
+      catch (err) { window.alert(err.message); toggle.checked = !toggle.checked; }
+    });
+    return h("div", { class: "pad ml-block" },
+      h("div", { class: "mood-head" },
+        h("strong", { class: "small", text: "Statistical filter (logistic regression)" }),
+        toneBadge(m.validated ? "good" : "neutral", m.validated ? "Validated" : "Not validated"),
+        h("label", { class: "toggle small" }, toggle, " use it when validated")),
+      h("dl", { class: "detail-grid compact" },
+        kv("Test AUC", `${fmt2(mt.test_auc)} (0.5 = no skill)`),
+        kv("Brier (test)", `${fmt2(mt.test_brier)} vs ${fmt2(mt.test_brier_baseline)} guessing`),
+        kv("Kept trades", `${mt.test_kept ?? 0} of ${mt.test_trades ?? 0} at ≥ ${Math.round((m.threshold ?? 0) * 100)}%`),
+        kv("Kept vs all (test)", `${fmtR(mt.test_kept_expectancy_r)} vs ${fmtR(mt.test_expectancy_r)}`),
+        kv("Strongest inputs", (mt.top_features || []).slice(0, 3).map((f) => `${f.name} ${f.weight > 0 ? "+" : "−"}`).join(", ") || DASH),
+      ),
+      plainList(m.reasons || [], "small"),
+    );
+  }
+
+  function renderLab(view) {
+    const body = $("lab-body");
+    const res = view.result;
+    const applied = view.applied || {};
+    const appliedRow = h("div", { class: "pad lab-applied" },
+      h("span", { class: "small" }, "In use for ", h("strong", { text: horizonLabel(view.horizon) }), ": ",
+        h("strong", { text: applied.label || "published rules" }), h("span", { class: "muted", text: ` (${applied.source || "default"})` })),
+      applied.filter && (applied.filter !== "base" || applied.exit !== "x1")
+        ? h("button", { type: "button", class: "ghost small", text: "Reset to published rules", onclick: async () => {
+            try { renderLab(await api(`/api/lab/reset?horizon=${view.horizon}`, { method: "POST" })); } catch (err) { window.alert(err.message); }
+          } })
+        : null);
+    if (!res) {
+      body.replaceChildren(appliedRow, h("p", { class: "muted small pad", text: "No lab run yet for this horizon. Press Run the lab (it downloads about 4,000 candles per coin, like Find scalps, and takes a minute)." }), mlBlock(view));
+      $("lab-meta").textContent = "";
+      return;
+    }
+    $("lab-meta").textContent = `${res.coins.length} coins · ${fmtTime(res.generated_at)} · costs ${res.cost_pct.toFixed(2)}%`;
+    const verdict = h("div", { class: `pad lab-verdict ${res.accepted ? "ok" : "no"}` },
+      toneBadge(res.accepted ? "good" : "warning", res.accepted ? "Better variant found and confirmed" : "Nothing beat the rules on newer data"),
+      plainList(res.reasons, "small"));
+    const byKey = Object.fromEntries((view.filters || []).map((f) => [f.key, f.label]));
+    const exitKey = Object.fromEntries((view.exits || []).map((f) => [f.key, f.label]));
+    const combos = res.combos.slice(0, 12).map((c) => h("tr", { class: c.filter === res.chosen[0] && c.exit === res.chosen[1] ? "chosen" : null },
+      h("td", {}, h("div", { text: byKey[c.filter] || c.filter }), h("div", { class: "muted small", text: exitKey[c.exit] || c.exit })),
+      h("td", { class: "num" }, ...splitCell(c.train)),
+      h("td", { class: "num" }, ...splitCell(c.test)),
+      h("td", { class: "num hide-sm", text: c.test.profit_factor == null ? DASH : c.test.profit_factor.toFixed(2) }),
+      h("td", {}, h("button", { type: "button", class: "ghost small", text: "Use", title: "Apply this variant by hand (your decision, even if the lab did not confirm it)",
+        onclick: async () => {
+          if (!window.confirm(`Use "${byKey[c.filter]}; ${exitKey[c.exit]}" for ${horizonLabel(view.horizon)} scalps?`)) return;
+          try { renderLab(await api(`/api/lab/apply?horizon=${view.horizon}`, { method: "POST", body: { filter: c.filter, exit: c.exit } })); }
+          catch (err) { window.alert(err.message); }
+        } })),
+    ));
+    const st = res.stats || {};
+    body.replaceChildren(...[
+      appliedRow,
+      verdict,
+      h("div", { class: "pad" }, h("strong", { class: "small", text: `Cumulative result in R: ${applied.label || "published rules"} (all coins)` })),
+      equityChart(st.equity, res.split_time),
+      h("div", { class: "pad" }, h("strong", { class: "small", text: "Average result per trade by starting hour (UTC)" })),
+      hourChart(st.by_hour_utc),
+      h("div", { class: "pad" }, h("strong", { class: "small", text: "Best variants (sorted by the older 70%, the part that chooses)" })),
+      table([["Variant"], ["Older 70%", "num"], ["Newer 30%", "num"], ["PF new", "num hide-sm"], [""]], combos),
+      h("details", { class: "pad lab-tables" }, h("summary", { class: "small", text: "Breakdown tables (by coin, setup, weekday, hour)" }),
+        statsTable(st.by_coin, "Coin"), statsTable(st.by_setup, "Setup"), statsTable(st.by_weekday, "Weekday"), statsTable(st.by_hour_utc, "Hour (UTC)")),
+      mlBlock(view),
+      res.errors && res.errors.length ? h("p", { class: "muted small pad", title: res.errors.join("\n"), text: `${res.errors.length} coin(s) skipped (not enough clean history)` }) : null,
+    ].filter(Boolean));
+  }
+
+  function horizonLabel(k) {
+    return { "15m": "15-minute scalps", "1h": "1-hour trades", "4h": "4-hour trades" }[k] || k;
+  }
+
+  async function refreshLab() {
+    const horizon = labHorizon;
+    try {
+      const view = await getJSON(`/api/lab?horizon=${horizon}`);
+      if (horizon !== labHorizon) return;
+      renderLab(view);
+      renderLabStatus({ [horizon]: view.status });
+    } catch (err) {
+      $("lab-body").replaceChildren(h("p", { class: "muted small pad", text: `Lab unavailable: ${err.message}` }));
+    }
+  }
+
+  function renderLabStatus(all) {
+    if (!all) return;
+    const st = all[labHorizon];
+    if (!st) return;
+    const button = $("lab-run");
+    button.disabled = st.running || emergency;
+    button.textContent = st.running ? "Running…" : "Run the lab";
+    $("lab-status").textContent = st.running ? st.phase : st.outcome === "failed" ? `Failed: ${st.error || "unknown"}` : st.outcome === "stopped" ? "Stopped" : "";
+    $("lab-progress").style.width = st.running && st.total ? `${Math.min(100, (st.done / st.total) * 100)}%` : "0%";
+    for (const [key, value] of Object.entries(all)) {
+      if (labSeen[key] !== undefined && labSeen[key] !== value.finished_at && key === labHorizon && value.finished_at) refreshLab();
+      labSeen[key] = value.finished_at;
+    }
+  }
+
+  function setLabHorizon(key) {
+    labHorizon = key;
+    pref("labHorizon", key);
+    document.querySelectorAll("[data-lab-horizon]").forEach((b) => b.setAttribute("aria-checked", b.dataset.labHorizon === key ? "true" : "false"));
+    $("lab-body").replaceChildren(h("p", { class: "muted small pad", text: "Loading…" }));
+    refreshLab();
+  }
+
+  async function startLab() {
+    try {
+      const r = await api(`/api/lab/run?horizon=${labHorizon}`, { method: "POST", timeoutMs: 60000 });
+      renderLabStatus({ [labHorizon]: r.status });
+      scheduleControl(1000);
+    } catch (err) {
+      window.alert(`Could not start the lab: ${err.message}`);
+    }
+  }
+
+  // ---------------------------------------------------------------- AI review (phase 7)
+
+  const VERDICT_TONE = { agree: "good", caution: "warning", reject: "critical" };
+
+  function aiChip(review) {
+    if (!review) return null;
+    return h("span", { class: "ai-chip", title: review.summary }, toneBadge(VERDICT_TONE[review.verdict] || "neutral", `AI: ${review.verdict}`));
+  }
+
+  function aiReviewBlock(review) {
+    return h("div", { class: `ai-review ${review.verdict}` },
+      h("div", { class: "mood-head" }, toneBadge(VERDICT_TONE[review.verdict] || "neutral", `AI ${review.verdict}`),
+        h("span", { class: "muted small", text: `${Math.round((review.confidence ?? 0) * 100)}% confident · ${review.model} · ${review.effect}` })),
+      h("p", { class: "small", text: review.summary }),
+      review.risks.length ? h("div", {}, h("strong", { class: "small", text: "Risks it sees" }), plainList(review.risks, "small")) : null,
+      review.checks_before_entry.length ? h("div", {}, h("strong", { class: "small", text: "Check before buying" }), plainList(review.checks_before_entry, "small")) : null,
+      h("p", { class: "muted small", text: "A second opinion from the language model. It can only lower a signal, never raise one." }),
+    );
+  }
+
+  async function requestReview(kind, symbol, horizon, container, button) {
+    button.disabled = true;
+    button.classList.add("busy");
+    try {
+      const review = await api("/api/ai/review", { method: "POST", body: { kind, symbol, horizon: horizon || null, model: $("chat-model").value || null }, timeoutMs: 180000 });
+      container.replaceChildren(aiReviewBlock(review));
+      if (kind === "scalp") refreshScalp(); else refreshSignals();
+    } catch (err) {
+      container.replaceChildren(h("p", { class: "muted small", text: `AI review unavailable: ${err.message}` }));
+    } finally {
+      button.disabled = false;
+      button.classList.remove("busy");
+    }
+  }
+
+  async function loadAiSettings() {
+    try {
+      const st = await getJSON("/api/ai/settings");
+      $("ai-mode").value = st.mode;
+      $("ai-auto").checked = !!st.auto;
+      $("ai-mode").disabled = $("ai-auto").disabled = !st.available;
+      if (!st.available) $("ai-mode").title = $("ai-auto").title = "Needs OPENAI_API_KEY on the server";
+    } catch { /* optional */ }
+  }
+
+  async function saveAiSettings() {
+    try {
+      await api("/api/ai/settings", { method: "PUT", body: { mode: $("ai-mode").value, auto: $("ai-auto").checked } });
+    } catch (err) {
+      window.alert(err.message);
+      loadAiSettings();
     }
   }
 
@@ -2184,6 +2526,13 @@
     document.querySelectorAll(".segmented [data-horizon]").forEach((b) => b.addEventListener("click", () => setHorizon(b.dataset.horizon)));
     setHorizon(savedHorizon === "15m" || savedHorizon === "4h" ? savedHorizon : "1h");
     $("scalp-scan").addEventListener("click", startScalp);
+    const savedLab = pref("labHorizon");
+    document.querySelectorAll("[data-lab-horizon]").forEach((b) => b.addEventListener("click", () => setLabHorizon(b.dataset.labHorizon)));
+    setLabHorizon(savedLab === "15m" || savedLab === "4h" ? savedLab : "1h");
+    $("lab-run").addEventListener("click", startLab);
+    $("ai-mode").addEventListener("change", saveAiSettings);
+    $("ai-auto").addEventListener("change", saveAiSettings);
+    loadAiSettings();
     $("record-refresh").addEventListener("click", refreshRecord);
     refreshRecord();
 

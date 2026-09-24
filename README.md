@@ -16,10 +16,10 @@ Nothing in this project promises profitability or accuracy.
 | 3 | On-demand controls, dashboard UI, charts, live updates | **Done** |
 | 4 | Portfolio, risk, allocation, DCA, P/L scenarios | **Done** |
 | 5 | News, sentiment, whale / on-chain | **Done** |
-| 6 | Alerts | Next |
-| 7 | OpenAI reasoning layer | Partly: AI chat assistant (read-only; cannot change signals) |
-| 8 | Signal tracking, backtesting, statistics | Partly: track record of every buy signal, per-coin backtests for scalp signals |
-| 9 | ML / statistical prediction | |
+| 6 | Scalp signals, track record, emergency stop | **Done** (price alerts: not yet) |
+| 7 | OpenAI reasoning layer | **Done**: AI chat assistant and AI review of signals (can only lower a signal) |
+| 8 | Signal tracking, backtesting, statistics | **Done**: track record, per-coin backtests, Strategy lab (walk-forward test of rule variants) |
+| 9 | ML / statistical prediction | **Done**: statistical trade filter, used only after it validates on newer data |
 
 ## Decision hierarchy
 
@@ -263,7 +263,90 @@ pressure, price versus the stop and TP1, and the entry window (2 candles). A tes
 engine never uses future data: every setup found in the full history is identical when the history
 ends at that candle.
 
+**Waiting coins (conditional plans):** most of the time a coin is in a usable trend but no
+trigger candle has closed yet. Such a row is `WATCH` with a status line ("waiting for a pullback
+trigger", "downtrend: no long setups"...) and, where the rules allow, a *conditional plan*: the
+trigger price, the stop and the targets it would use, and what the coin's own backtest says it
+would get if the trigger fires ("would be BUY", "would stay WATCH: not enough evidence", "would
+be NO TRADE"). A conditional plan is not a signal: wait for the candle to close beyond the
+trigger and scan again. Kinds: *pullback* (uptrend, price above the EMA20: buy the first close
+above the last candle's high after a dip), *dip* (a dip under way: same trigger once it turns)
+and *breakout* (a close above the 20-candle high on volume).
+
 `POST /api/scalp/scan?horizon=1h` (token), `GET /api/scalp?horizon=1h`, `GET /api/scalp/{symbol}?horizon=4h` (token).
+
+## Strategy lab (Phase 8)
+
+The published scalp rules are a starting point, not the best rules for every market. The
+Strategy lab card tests alternatives on *your* coins' real history and tells you, honestly,
+whether any of them is better. Pick a horizon and press **Run the lab** (token; it runs in the
+background, takes a few minutes, and uses the same candles as a scalp scan, no extra credits).
+
+* **Grid:** 6 entry filters (published rules, volume-confirmed pullbacks, ADX 20+, stop at least
+  3.5x costs away, pullbacks only, breakouts only) x 6 exit styles (targets 1R/2R, 1R/3R,
+  1.5R/3R, no break-even, all at 1.5R, double time limit) = 36 variants. The grid is small on
+  purpose: the more variants one tries, the more likely the best-looking one is luck.
+* **Walk-forward split:** each coin's history is split in time. The older 70% chooses the
+  variant; the newer 30%, never used for choosing, tests it.
+* **Acceptance:** the variant is applied to the scalp engine only if it earned at least +0.05R
+  per trade on the older data, made at least 20 trades and a profit on the newer data, and did
+  at least as well there as the published rules. Otherwise the lab says why and the published
+  rules stay. You can apply any variant by hand or reset to the published rules.
+* **Statistics shown:** trades, win rate, expectancy (R), profit factor, total R and max
+  drawdown for all / older / newer data; the equity curve in R with the split marked; results by
+  setup type, by time of day (UTC), by weekday, by coin and by outcome (stop, TP1, TP2, time).
+
+The applied variant and the last result are stored in `app_settings` and survive restarts.
+`GET /api/lab?horizon=1h`, `POST /api/lab/run`, `POST /api/lab/apply` (`{"filter": "adx", "exit": "x3"}`),
+`POST /api/lab/reset` (token).
+
+## Statistical trade filter (Phase 9)
+
+Each lab run also trains a small logistic-regression model on the chosen variant's trades. It
+estimates the chance that a setup ends as a winner (net of costs) from 17 numbers known when the
+signal candle closes: trend strength (ADX, distance from the EMAs, higher-timeframe RSI and
+momentum), volatility (ATR, Bollinger width), volume, RSI, distance to the 20-candle high,
+Bitcoin's momentum, the stop distance versus costs, the setup type and the hour of day. It is
+pure Python (no machine-learning libraries, little memory).
+
+It is honest by construction: it is trained on the older trades and judged only on the newer
+ones; its probability cut is chosen on the older trades; and it counts as **validated** only if,
+on the newer trades, it separates winners from losers (AUC 0.55 or more) and the trades it keeps
+earned clearly more (+0.05R) than all trades. Only a validated model is used, and it can only
+lower a scalp label to `WATCH` (probability below the cut), never raise one. An unvalidated model
+is shown with its numbers and reasons and does nothing. The lab card has a switch to turn a
+validated model off. Each prediction is stored in `model_predictions`.
+`GET /api/ml?horizon=1h`, `PUT /api/ml?horizon=1h` (`{"enabled": false}`, token).
+
+## AI review (Phase 7)
+
+Press **AI review** on a scalp or swing signal: an OpenAI model gets the engine's full plan and
+evidence (levels, backtest, conditions, risks) and answers in JSON with a verdict, *agree*,
+*caution* or *reject*, the concrete risks it sees and a short summary. The verdict shows next to
+the signal and is stored with it (`signals.ai_output`), and the Track record groups results by
+verdict, so after a few weeks you can see whether the AI's objections were worth anything.
+
+* **Advisory** (default): the verdict is shown, the label is unchanged.
+* **Filter**: a *reject* caps BUY / STRONG BUY at WATCH. The AI can only lower a signal, never
+  raise one, and never overrides the data checks.
+* **Auto-review** (off by default): after each scan, the first new buy signals (3; `auto_max` 1-10 via
+  the API) are reviewed automatically. Each review is one OpenAI call.
+
+Settings are in the AI assistant card and stored in `app_settings`.
+`POST /api/ai/review` (`{"kind": "scalp", "symbol": "SOL", "horizon": "1h"}`, token),
+`GET/PUT /api/ai/settings` (`{"mode": "filter", "auto": true, "auto_max": 3}`, token).
+
+## Emergency stop
+
+The red **Emergency stop** button in the header halts everything at once: the running scan
+(coins in progress may finish for up to 20 seconds, then it is cancelled), Auto-analyze, live
+prices, scalp scans, the Strategy lab and AI reviews. While it is engaged the server refuses
+every request that would reach a provider, news source or OpenAI (HTTP 503), so no credits are
+spent, and the dashboard's auto-refresh stops. Stored signals, the track record, the last scalp
+scan and the lab results stay readable, and you can still edit the watchlist and coin
+selection. It survives restarts. **Resume** (in the red banner) releases it; nothing restarts on
+its own. `POST /api/control/kill` (optional `{"reason": "..."}`) and `POST /api/control/resume`
+(token).
 
 ## Track record
 
@@ -309,7 +392,8 @@ are spent while you are not using the dashboard.
   `GET/PUT /api/control/selection`.
 
 **Watchlist:** add any coin by symbol. It joins the next scan (marked "watchlist") with the full
-pipeline. It is priced from the 200-coin listing (still one CoinMarketCap credit), or from
+pipeline. Remove it with **Remove** in the Watchlist card, or **Remove from watchlist** under its name in
+the market table (it also leaves "Coins to analyse"). It is priced from the 200-coin listing (still one CoinMarketCap credit), or from
 CoinMarketCap quotes when it ranks lower. Stored in the `watchlist` table (migration 0002).
 
 **Charts:** the coin panel shows a candlestick chart (15m/1H/4H/1D, closed candles) with EMA20,
@@ -422,7 +506,8 @@ adding a key.
 ## Security
 
 Set `ADMIN_TOKEN` on Railway. Then Analyze now, Stop, Auto-analyze, live prices, watchlist
-changes, the AI chat (it spends your OpenAI credits) and the portfolio all require it. The
+changes, the AI chat and AI reviews (they spend your OpenAI credits), scalp scans, the Strategy
+lab, the emergency stop and resume, and the portfolio all require it. The
 dashboard asks for it once and keeps it in your browser. Public market data stays readable.
 Without `ADMIN_TOKEN`, anyone who finds the URL can use those controls.
 
@@ -454,7 +539,12 @@ Without `ADMIN_TOKEN`, anyone who finds the URL can use those controls.
 | `POST /api/scalp/scan?horizon=15m\|1h\|4h` (token) | Scalp scan of the selected coins, in the background |
 | `GET /api/scalp?horizon=1h` | Latest scalp scan (signals, per-coin backtest, pooled record) and scan status |
 | `GET /api/scalp/{symbol}?horizon=1h` (token) | Scalp analysis of one coin now |
-| `GET /api/performance?days=90` | Track record per strategy and the latest outcomes |
+| `GET /api/performance?days=90` | Track record per strategy, by AI verdict, and the latest outcomes |
+| `POST /api/control/kill`, `POST /api/control/resume` (token) | Emergency stop and resume |
+| `GET /api/lab?horizon=1h`, `POST /run` · `/apply` · `/reset` (token) | Phase 8: Strategy lab result, run, apply or reset a rule variant |
+| `GET /api/ml?horizon=1h`, `PUT` (token) | Phase 9: statistical filter state and validation; switch it off or on |
+| `POST /api/ai/review` (token) | Phase 7: AI review of a scalp or swing signal (agree / caution / reject) |
+| `GET/PUT /api/ai/settings` (PUT: token) | AI review mode (advisory / filter) and auto-review |
 | `POST /api/chat` | AI assistant (token); optional `model` and `reasoning_effort` |
 | `GET /api/portfolio`, `PUT /cash`, `POST/DELETE /positions`, `PUT /risk`, `POST /plan` | Portfolio, risk settings, trade plan (token) |
 | `GET /api/assets/{symbol}/analysis` | Phase 2: indicators, structure, regimes, score factors, trade plan, risk checks, full pipeline |
@@ -577,6 +667,11 @@ and the Phase 2 endpoints with persistence and de-duplication (SQLite and Postgr
 Phase 3-5: manual control, watchlist, news parsing, chat, portfolio, and the on-chain and
 sentiment parsers, scores, notes, endpoints, refresh guard and persistence, with every free
 source mocked. Sentiment notes are checked to leave labels and scores unchanged.
+Phase 6-9: scalp rules without lookahead, per-coin backtests, the track record, conditional
+plans, the emergency stop (allowlist, graceful stop, persistence), watchlist removal, the
+Strategy lab split and acceptance rule, the statistical filter (validation gates, no future data
+in its features, filtering only when validated) and AI review (JSON parsing, advisory and filter
+modes, auto-review, storage and the by-verdict record), on SQLite and PostgreSQL.
 Fake adapters and synthetic markets exist only in `backend/tests`; production code never
 generates data.
 
@@ -614,5 +709,10 @@ Phase 3/4 services: `control.py` (manual scans, schedule, live prices), `watchli
 Phase 5: `onchain.py` (network data, whales, stablecoins), `sentiment.py` (market mood),
 `events.py` (token unlocks, airdrops), `selection.py` (coins to analyse);
 Phase 6: `analysis/scalp.py` (scalp rules and backtest), `analysis/trade_sim.py` (shared trade
-simulator), `services/scalp.py`, `services/outcomes.py` (track record);
+simulator), `services/scalp.py`, `services/outcomes.py` (track record),
+`services/killswitch.py` (emergency stop);
+Phase 7: `services/ai_review.py`;
+Phase 8: `analysis/lab.py` (variant grid, walk-forward split, statistics), `services/lab.py`;
+Phase 9: `analysis/ml.py` (logistic regression and its validation);
+`services/settings_store.py` (small JSON settings in `app_settings`);
 routes in `api/controls.py`.
