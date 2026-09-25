@@ -25,7 +25,7 @@ from app.services.settings_store import SettingsStore
 log = logging.getLogger(__name__)
 
 REFRESH_SECONDS = 1800
-HORIZON_OF = {"mtf_trend_pullback": "swing", "scalp_15m": "15m", "scalp_1h": "1h", "scalp_4h": "4h"}
+HORIZON_OF = {"mtf_trend_pullback": "swing", "scalp_15m": "15m", "scalp_1h": "1h", "scalp_4h": "4h", "scalp_1d": "1d"}
 
 
 def _aware(value: datetime) -> datetime:

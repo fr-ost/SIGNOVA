@@ -158,7 +158,7 @@ async def latest_signals(c: ContainerDep) -> SignalScanOut | None:
 
 # ----------------------------------------------------------------------------- scalp signals, track record
 
-HorizonQuery = Annotated[str, Query(pattern=r"^(15m|1h|4h)$")]
+HorizonQuery = Annotated[str, Query(pattern=r"^(15m|1h|4h|1d)$")]
 
 
 @router.post("/api/scalp/scan", tags=["scalp"])
@@ -299,7 +299,7 @@ async def learning_toggle(body: ToggleIn, c: ContainerDep, _: Admin) -> dict[str
 
 @router.get("/api/evidence/{symbol}", tags=["evidence"])
 async def evidence_view(symbol: SymbolPath, c: ContainerDep,
-                        horizon: Annotated[str, Query(pattern=r"^(swing|15m|1h|4h)$")] = "swing") -> dict[str, Any]:
+                        horizon: Annotated[str, Query(pattern=r"^(swing|15m|1h|4h|1d)$")] = "swing") -> dict[str, Any]:
     """The latest board computed for a coin (by a scan or by opening the coin); never fetches."""
     board = c.evidence.last.get((symbol.upper(), horizon))
     if board is None:
@@ -330,7 +330,7 @@ async def derivatives_coin(symbol: SymbolPath, c: ContainerDep) -> dict[str, Any
 class ReviewIn(BaseModel):
     kind: str = Field(pattern=r"^(swing|scalp)$")
     symbol: str = Field(min_length=1, max_length=15, pattern=r"^[A-Za-z0-9]+$")
-    horizon: str | None = Field(default=None, pattern=r"^(15m|1h|4h)$")
+    horizon: str | None = Field(default=None, pattern=r"^(15m|1h|4h|1d)$")
     model: str | None = Field(default=None, max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
 
 

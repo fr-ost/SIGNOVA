@@ -21,6 +21,7 @@ Nothing in this project promises profitability or accuracy.
 | 8 | Signal tracking, backtesting, statistics | **Done**: track record, per-coin backtests, Strategy lab (walk-forward test of rule variants) |
 | 9 | ML / statistical prediction | **Done**: statistical trade filter, used only after it validates on newer data |
 | 10 | Evidence engine | **Done**: futures positioning, liquidations and an estimated liquidation map, order flow, news read by the AI, hype, market trend; tracks the setups it holds back and learns from outcomes |
+| 11 | Strategy library | **Done**: 8 published strategies (Turtle breakout, Connors RSI(2), Bollinger, momentum, price action, market structure...) with their own exits, walk-forward research on every scan, 1-day horizon, "why no buy" |
 
 ## Decision hierarchy
 
@@ -225,7 +226,7 @@ in parallel (about 350 Binance request weight of the 6,000 per-minute limit). Co
 cross-checks stay cached per asset (30 minutes for 1H, 6 hours for 1D) under the credit pacing
 described above.
 
-## Scalp signals (15m / 1h / 4h)
+## Scalp signals (15m / 1h / 4h / 1d)
 
 The Scalp signals card finds short-term spot longs for a horizon you pick, on the coins in
 "Coins to analyse". Press **Find scalps**; nothing runs in the background.
@@ -235,6 +236,7 @@ The Scalp signals card finds short-term spot longs for a horizon you pick, on th
 | 15 min | 5m | 15m | 1H | 30 minutes |
 | 1 hour | 15m | 1H | 4H | 2 hours |
 | 4 hours | 1H | 4H | 1D | 8 hours |
+| 1 day | 4H | 1D | 1D | 2 days |
 
 **Setups** (long only): a *pullback* (uptrend, dip to the EMA20, RSI resets to 52 or lower, then
 a bullish candle closes above the previous high) or a *breakout* (close above the 20-candle
@@ -275,6 +277,46 @@ above the last candle's high after a dip), *dip* (a dip under way: same trigger 
 and *breakout* (a close above the 20-candle high on volume).
 
 `POST /api/scalp/scan?horizon=1h` (token), `GET /api/scalp?horizon=1h`, `GET /api/scalp/{symbol}?horizon=4h` (token).
+
+## Strategy library and research (Phase 11)
+
+"Why does the scalp card never show BUY?" Because a label is earned: the rules must have made
+money after costs on the coins' own history. When they lost (for example −0.08R per trade across
+18 coins at 4 hours), the honest answer is no buy. Phase 11 gives the engine far more to choose
+from, and lets your own market data decide which of it works.
+
+Eight strategies, each written from its published rules, with its own stop and its own exit:
+
+| Strategy | Source | Exit |
+|---|---|---|
+| Trend pullback | L. Raschke's "Holy Grail" family | half at 1R, rest at 2R |
+| Volatility squeeze breakout | J. Bollinger's squeeze, M. Minervini's volatility contraction | half at 1R, rest at 2R |
+| Turtle 55-candle breakout | the Turtle Traders (R. Dennis, W. Eckhardt), R. Donchian | trailing stop at the 20-candle low |
+| EMA 9/21 momentum | classic crossover with J. Welles Wilder's ADX | half at 1.5R, trail the rest 3 ATR (C. LeBeau's chandelier) |
+| Connors RSI(2) pullback | L. Connors & C. Alvarez, "Short Term Trading Strategies That Work" | close above the 5-period average |
+| Bollinger band reclaim | J. Bollinger, "Bollinger on Bollinger Bands" | middle band |
+| Inside-bar breakout | price action (A. Brooks, N. Fuller) | half at 1R, rest at 2.5R |
+| Break of structure | Dow theory / market structure ("smart money concepts") | half at 1.5R, trail the rest 3 ATR |
+
+**Research on every scan:** each strategy is backtested on every selected coin (one trade at a
+time, costs included, stop first when a candle hits both, gaps fill at the open). Each coin's
+history is split in time: the older 70% and the newer 30%. Pooled over the coins, a strategy is
+**validated** only with 60+ older and 25+ newer trades, at least +0.05R per trade on the older
+part, at least +0.02R on the newer part, and a t-statistic of 1.5 or more (unlikely to be luck).
+Only a validated strategy can give a BUY; a coin on which it lost (8+ trades) is excluded; STRONG
+BUY also needs +0.15R on the newer part and a strong record on the coin itself. When several
+strategies fire on one coin, the best-validated one is shown ("+1 more" lists the others).
+
+**Why no buy** (under the scan): says which strategies are validated, which setups fired but were
+held back and why (price already ran, lost on this coin, a filter), or that nothing made money
+at this horizon, and what to try: another horizon, more coins (a bigger sample validates sooner),
+or lower fees. The **Strategy research** table shows every strategy's result on the older and
+newer data. The **1-day horizon** (4H candles, 1D trend, up to 2 days per trade) pays much less
+in fees relative to the move, which is often where the edge is.
+
+Trailing and indicator exits are followed the same way by the track record (the exit rule is
+stored with each signal), and the plan tells you how to manage the trade ("trail: stop at the
+lowest low of the last 20 candles, raise it after each candle").
 
 ## Evidence engine (Phase 10)
 
@@ -746,6 +788,10 @@ plans, the emergency stop (allowlist, graceful stop, persistence), watchlist rem
 Strategy lab split and acceptance rule, the statistical filter (validation gates, no future data
 in its features, filtering only when validated) and AI review (JSON parsing, advisory and filter
 modes, auto-review, storage and the by-verdict record), on SQLite and PostgreSQL.
+Phase 11: trailing and exit-signal simulation, gap fills, every library strategy free of future
+data, one-trade-at-a-time backtests, the research gates (both parts, trade counts, luck), verdicts,
+a validated strategy producing a BUY with its exit rule stored and followed by the track record,
+"why no buy", and the 1-day horizon.
 Phase 10: every exchange parser against its documented payload (errors, 1000x contracts),
 exchange failover and region skipping, OKX USD open interest, the liquidation map (levels,
 crossed levels removed, long/short split), each evidence factor and veto, thin boards,
@@ -793,6 +839,7 @@ simulator), `services/scalp.py`, `services/outcomes.py` (track record),
 Phase 7: `services/ai_review.py`;
 Phase 8: `analysis/lab.py` (variant grid, walk-forward split, statistics), `services/lab.py`;
 Phase 9: `analysis/ml.py` (logistic regression and its validation);
+Phase 11: `analysis/strategies.py` (strategy library, exits, research, verdicts);
 Phase 10: `data/derivatives.py` (exchange parsers), `services/derivatives.py` (failover, cache),
 `analysis/liqmap.py` (liquidation map), `analysis/evidence.py` (factors, score, vetoes),
 `analysis/evidence_learn.py` and `services/learning.py` (learning from outcomes),

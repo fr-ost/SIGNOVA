@@ -28,7 +28,7 @@ from app.analysis.evidence import GRADE_TEXT, LABELS, PRIOR_WEIGHTS
 
 TRAIN_FRACTION = 0.7
 SIDE_THRESHOLD = 0.1
-HORIZON_FEATURES = ("h_swing", "h_15m", "h_1h", "h_4h")
+HORIZON_FEATURES = ("h_swing", "h_15m", "h_1h", "h_4h", "h_1d")
 
 
 @dataclass

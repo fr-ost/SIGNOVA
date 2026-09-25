@@ -8,6 +8,7 @@ Three horizons, each with a setup timeframe (where the entry is found), a trend 
 | 15m     | 5m    | 15m   | 1H     | 6 candles (30 min)  |
 | 1h      | 15m   | 1H    | 4H     | 8 candles (2 hours) |
 | 4h      | 1H    | 4H    | 1D     | 8 candles (8 hours) |
+| 1d      | 4H    | 1D    | 1D     | 12 candles (2 days) |
 
 Two setups, both long only:
 
@@ -71,6 +72,7 @@ PROFILES: dict[str, ScalpProfile] = {
     "15m": ScalpProfile("15m", "15-minute scalp", Timeframe.M5, Timeframe.M15, Timeframe.H1, 6, True, 4000),
     "1h": ScalpProfile("1h", "1-hour trade", Timeframe.M15, Timeframe.H1, Timeframe.H4, 8, True, 4000),
     "4h": ScalpProfile("4h", "4-hour trade", Timeframe.H1, Timeframe.H4, Timeframe.D1, 8, False, 4000),
+    "1d": ScalpProfile("1d", "1-day trade", Timeframe.H4, Timeframe.D1, Timeframe.D1, 12, False, 3000),
 }
 
 
@@ -189,6 +191,16 @@ class ScalpSeries:
     btc_roc: list[float | None]  # Bitcoin's trend-timeframe 10-candle rate of change
     taker_ratio: list[float | None] = field(default_factory=list)  # 3-candle taker buy share (None: no data)
     cvd_norm: list[float | None] = field(default_factory=list)  # 20-candle net taker buying / volume
+    # strategy library inputs (app.analysis.strategies)
+    ema9: ind.Series = field(default_factory=list)
+    ema21: ind.Series = field(default_factory=list)
+    ema200: ind.Series = field(default_factory=list)
+    sma5: ind.Series = field(default_factory=list)
+    rsi2: ind.Series = field(default_factory=list)
+    bb_lower: list[float | None] = field(default_factory=list)
+    bb_mid: list[float | None] = field(default_factory=list)
+    hh55: list[float | None] = field(default_factory=list)  # highest high of the 55 candles before i
+    pivot_lows: list[tuple[int, float]] = field(default_factory=list)  # (confirmation index, price)
 
     def __len__(self) -> int:
         return len(self.candles)
@@ -253,9 +265,19 @@ def build_series(
                 vol20 = sum(v for _, v in window20)
                 cvd[k] = sum(2 * tb - v for tb, v in window20) / vol20 if vol20 > 0 else None
     right = 3
-    pivots = sorted(
-        ((p.index + right, p.price) for p in find_pivots(setup, 5, right) if p.kind == "high"), key=lambda x: x[0]
-    )
+    found = find_pivots(setup, 5, right)
+    pivots = sorted(((p.index + right, p.price) for p in found if p.kind == "high"), key=lambda x: x[0])
+    lows_pivots = sorted(((p.index + right, p.price) for p in found if p.kind == "low"), key=lambda x: x[0])
+    hh55: list[float | None] = [None] * len(setup)
+    window_max: list[int] = []  # monotonic deque of indices (highest highs), last 55 candles before i
+    for k in range(len(setup)):
+        while window_max and window_max[0] < k - 55:
+            window_max.pop(0)
+        if k >= 55:
+            hh55[k] = highs[window_max[0]]
+        while window_max and highs[window_max[-1]] <= highs[k]:
+            window_max.pop()
+        window_max.append(k)
     return ScalpSeries(
         profile=profile,
         candles=list(setup),
@@ -284,6 +306,15 @@ def build_series(
         btc_roc=btc_roc,
         taker_ratio=taker_ratio,
         cvd_norm=cvd,
+        ema9=ind.ema(closes, 9),
+        ema21=ind.ema(closes, 21),
+        ema200=ind.ema(closes, 200),
+        sma5=ind.sma(closes, 5),
+        rsi2=ind.rsi(closes, 2),
+        bb_lower=list(bands.lower),
+        bb_mid=list(bands.middle),
+        hh55=hh55,
+        pivot_lows=lows_pivots,
     )
 
 

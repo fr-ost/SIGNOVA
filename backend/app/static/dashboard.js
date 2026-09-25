@@ -1424,10 +1424,19 @@
         h("p", { class: "muted small", text: "Levels move with every candle. Re-run Find scalps after the trigger candle closes; the backtest decides whether it becomes a buy." }),
       ));
     }
+    if (sig.strategy) {
+      const stg = sig.strategy;
+      parts.push(h("div", { class: "pad strategy-box" },
+        h("strong", { class: "small", text: `Strategy: ${stg.name}` }),
+        h("p", { class: "small", text: stg.rule }),
+        h("p", { class: "muted small", text: `Source: ${stg.source}` }),
+        sig.also && sig.also.length ? h("p", { class: "muted small", text: `Also fired now: ${sig.also.join(" · ")}` }) : null));
+    }
     if (sig.plan) {
       const p = sig.plan;
       parts.push(h("dl", { class: "detail-grid compact" },
         kv("Buy zone", `${fmtPrice(p.entry_low)} to ${fmtPrice(p.entry_high)}`),
+        kv("Take profit", p.exit_rule || `TP1 ${fmtPrice(p.tp1)}, TP2 ${fmtPrice(p.tp2)}`),
         kv("Stop", `${fmtPrice(p.stop)} (−${p.risk_pct.toFixed(2)}%)`),
         kv("Net R:R", `${p.reward_risk_tp1.toFixed(2)} at TP1 · ${p.reward_risk_tp2.toFixed(2)} at TP2`),
         kv("Size", `${p.suggested_allocation_pct.toFixed(1)}% of portfolio (risks ${p.risk_at_allocation_pct.toFixed(2)}%)`),
@@ -1498,7 +1507,9 @@
       h("td", {}, h("div", { class: "asset-cell" }, h("strong", { text: sig.symbol }), h("span", { class: "muted small", text: sig.name }))),
       h("td", {}, signalBadge(sig.signal, null), sig.status ? h("div", { class: "muted small status-line", text: sig.status }) : null, aiChip(sig.ai_review),
         sig.board ? evidenceChip(sig.board.score, sig.board.grade, sig.board.vetoes && sig.board.vetoes.length) : null),
-      h("td", { class: "hide-sm", text: sig.setup ? humanize(sig.setup) : DASH }),
+      h("td", { class: "hide-sm", title: sig.strategy ? sig.strategy.source : null },
+        sig.strategy ? sig.strategy.name : sig.setup ? humanize(sig.setup) : DASH,
+        sig.also && sig.also.length ? h("div", { class: "muted small", text: `+${sig.also.length} more` }) : null),
       h("td", { class: planCls }, ...entryCell),
       h("td", { class: planCls }, ...(p ? level(p.stop, `−${p.risk_pct.toFixed(2)}%`) : w ? level(w.stop, `−${w.risk_pct.toFixed(2)}%`) : [DASH])),
       h("td", { class: planCls }, ...(p ? level(p.tp1, fmtPrice(p.tp2)) : w ? level(w.tp1, fmtPrice(w.tp2)) : [DASH])),
@@ -1514,6 +1525,37 @@
 
   let lastScalp = null;
 
+  function renderResearch(res) {
+    const why = $("scalp-why");
+    if (res && res.no_buy_reason) {
+      why.replaceChildren(h("strong", { text: "Why no buy: " }), res.no_buy_reason);
+      why.hidden = false;
+    } else {
+      why.hidden = true;
+    }
+    const box = $("scalp-research");
+    const rows = (res && res.research) || [];
+    if (!rows.length) { box.hidden = true; return; }
+    const valid = rows.filter((r) => r.validated).length;
+    $("scalp-research-meta").textContent = ` · ${valid} of ${rows.length} validated on these coins`;
+    const cell = (sp) => (sp && sp.trades ? [fmtR(sp.expectancy_r), h("div", { class: "muted small", text: `${sp.trades} tr · ${Math.round(sp.win_rate ?? 0)}%` })] : [DASH]);
+    const sorted = rows.slice().sort((a, b) => (b.validated - a.validated) || ((b.all.expectancy_r ?? -9) - (a.all.expectancy_r ?? -9)));
+    $("scalp-research-body").replaceChildren(
+      table([["Strategy"], ["Older 70%", "num"], ["Newer 30%", "num"], ["All", "num hide-sm"], ["Exit", "hide-sm"], ["Verdict"]],
+        sorted.map((r) => h("tr", { class: r.validated ? "chosen" : null },
+          h("td", { title: r.source }, h("strong", { class: "small", text: r.name }), h("div", { class: "muted small rule-text", text: r.rule })),
+          h("td", { class: `num ${r.train.expectancy_r > 0 ? "pnl-up" : r.train.expectancy_r < 0 ? "pnl-down" : ""}` }, ...cell(r.train)),
+          h("td", { class: `num ${r.test.expectancy_r > 0 ? "pnl-up" : r.test.expectancy_r < 0 ? "pnl-down" : ""}` }, ...cell(r.test)),
+          h("td", { class: "num hide-sm" }, ...cell(r.all)),
+          h("td", { class: "hide-sm small", text: r.exit }),
+          h("td", {}, toneBadge(r.validated ? "good" : "neutral", r.validated ? "Validated" : "Not validated"),
+            h("div", { class: "muted small", text: r.reasons[0] || "" }))))),
+      h("p", { class: "muted small", text: "Results are per trade in R (1R = the amount risked), after fees and slippage, pooled over "
+        + "the scanned coins. A strategy may give a BUY only when both the older and the newer part of the history made money "
+        + "and the result is unlikely to be luck." }));
+    box.hidden = false;
+  }
+
   function renderScalp(res) {
     lastScalp = res;
     const rows = $("scalp-rows");
@@ -1521,6 +1563,7 @@
       rows.replaceChildren(h("tr", {}, h("td", { colspan: 8, class: "empty", text: "No scan yet for this horizon. Press “Find scalps”." })));
       $("scalp-meta").textContent = "";
       $("scalp-pooled").hidden = true;
+      renderResearch(null);
       return;
     }
     const c = res.counts;
@@ -1535,6 +1578,7 @@
     } else {
       $("scalp-pooled").hidden = true;
     }
+    renderResearch(res);
     const err = $("scalp-error");
     if (res.errors.length) setMessage(err, "Some coins could not be analysed", res.errors.slice(0, 5)); else err.hidden = true;
     rows.replaceChildren(...(res.signals.length ? res.signals.flatMap(scalpRows)
@@ -1871,7 +1915,7 @@
   }
 
   function horizonLabel(k) {
-    return { "15m": "15-minute scalps", "1h": "1-hour trades", "4h": "4-hour trades" }[k] || k;
+    return { "15m": "15-minute scalps", "1h": "1-hour trades", "4h": "4-hour trades", "1d": "1-day trades" }[k] || k;
   }
 
   async function refreshLab() {
@@ -2811,11 +2855,11 @@
 
     const savedHorizon = pref("scalpHorizon");
     document.querySelectorAll(".segmented [data-horizon]").forEach((b) => b.addEventListener("click", () => setHorizon(b.dataset.horizon)));
-    setHorizon(savedHorizon === "15m" || savedHorizon === "4h" ? savedHorizon : "1h");
+    setHorizon(["15m", "4h", "1d"].includes(savedHorizon) ? savedHorizon : "1h");
     $("scalp-scan").addEventListener("click", startScalp);
     const savedLab = pref("labHorizon");
     document.querySelectorAll("[data-lab-horizon]").forEach((b) => b.addEventListener("click", () => setLabHorizon(b.dataset.labHorizon)));
-    setLabHorizon(savedLab === "15m" || savedLab === "4h" ? savedLab : "1h");
+    setLabHorizon(["15m", "4h", "1d"].includes(savedLab) ? savedLab : "1h");
     $("lab-run").addEventListener("click", startLab);
     $("ai-mode").addEventListener("change", saveAiSettings);
     $("ai-auto").addEventListener("change", saveAiSettings);

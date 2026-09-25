@@ -155,12 +155,19 @@
           <button type="button" role="radio" data-horizon="15m" aria-checked="false">15 min</button>
           <button type="button" role="radio" data-horizon="1h" aria-checked="true">1 hour</button>
           <button type="button" role="radio" data-horizon="4h" aria-checked="false">4 hours</button>
+          <button type="button" role="radio" data-horizon="1d" aria-checked="false">1 day</button>
         </div>
         <button id="scalp-scan" type="button" class="primary">Find scalps</button>
         <span id="scalp-status" class="muted small" aria-live="polite"></span>
       </div>
       <div class="progress inset" aria-hidden="true"><span id="scalp-progress"></span></div>
       <p id="scalp-pooled" class="muted small pad" hidden></p>
+      <div id="scalp-why" class="alert inset why-none" role="note" hidden></div>
+      <details id="scalp-research" class="research pad" hidden>
+        <summary><strong class="small">Strategy research: which of the 8 strategies make money here</strong>
+          <span id="scalp-research-meta" class="muted small"></span></summary>
+        <div id="scalp-research-body"></div>
+      </details>
       <div id="scalp-error" class="alert inset" role="alert" hidden></div>
       <div class="table-wrap">
         <table>
@@ -212,6 +219,7 @@
           <button type="button" role="radio" data-lab-horizon="15m" aria-checked="false">15 min</button>
           <button type="button" role="radio" data-lab-horizon="1h" aria-checked="true">1 hour</button>
           <button type="button" role="radio" data-lab-horizon="4h" aria-checked="false">4 hours</button>
+          <button type="button" role="radio" data-lab-horizon="1d" aria-checked="false">1 day</button>
         </div>
         <button id="lab-run" type="button" class="primary">Run the lab</button>
         <span id="lab-status" class="muted small" aria-live="polite"></span>

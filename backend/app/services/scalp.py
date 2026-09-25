@@ -27,11 +27,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.analysis import lab as lab_rules
 from app.analysis import ml
 from app.analysis import scalp as sc
+from app.analysis import strategies as st
 from app.config import Settings
 from app.core.enums import SignalLabel, Timeframe
 from app.core.formatting import fmt_price
 from app.core.timeutil import utcnow
 from app.data.normalization.schemas import Candle
+from app.data.validation.prices import USD_STABLE_QUOTES
 from app.models import ModelPrediction, Signal, SignalTarget
 from app.services.settings_store import SettingsStore
 from app.services.analysis import evidence_record
@@ -41,8 +43,12 @@ from app.services.universe import UniverseAsset, UniverseService
 
 log = logging.getLogger(__name__)
 
-SCALP_VERSION = "scalp-1.0.0"
+SCALP_VERSION = "scalp-2.0.0"
 TREND_WARMUP = 250
+
+
+def humanize_label(label: SignalLabel) -> str:
+    return label.value.title().replace("Strong Buy", "Strong buy").replace("No Trade", "No trade")
 
 
 def strategy_name(horizon: str) -> str:
@@ -65,6 +71,7 @@ class ScalpPlan:
     risk_at_allocation_pct: float
     valid_until: datetime
     time_exit: str
+    exit_rule: str = ""  # how to take profit (targets, trailing stop or exit signal)
 
 
 @dataclass
@@ -96,6 +103,8 @@ class ScalpResult:
     board: dict[str, Any] | None = None  # Phase 10 evidence board
     filtered_by: str | None = None  # the filter that held a buy back (evidence | learned | ml)
     would_be: str | None = None  # the label before that filter
+    strategy: dict[str, Any] | None = None  # the strategy behind the setup (name, source, rule, exit)
+    also: list[str] = field(default_factory=list)  # other strategies that fired on this coin now
 
 
 @dataclass
@@ -118,6 +127,9 @@ class _Work:
     pending: sc.Pending | None = None
     features: dict[str, float] | None = None  # market at the setup candle (for the statistical filter)
     evidence: Any = None  # app.analysis.evidence.Evidence
+    library: dict[str, list[sc.TradeRecord]] = field(default_factory=dict)  # strategy -> trades over the history
+    library_now: dict[str, sc.Candidate] = field(default_factory=dict)  # strategies that fired on the last candles
+    split: datetime | None = None  # older 70% / newer 30% of this coin's history
 
 
 @dataclass
@@ -207,6 +219,7 @@ class ScalpService:
         self.states: dict[str, ScanState] = {h: ScanState(h) for h in sc.PROFILES}
         self.results: dict[str, dict[str, Any]] = {}
         self._pooled: dict[str, sc.BacktestStats] = {}
+        self._research: dict[str, dict[str, st.Research]] = {}
         self._stored: dict[tuple[str, str], datetime] = {}
 
     # ------------------------------------------------------------------ params
@@ -376,6 +389,7 @@ class ScalpService:
             pooled = sc.pool([w.stats for w in works if w.stats is not None])
             if pooled is not None:
                 self._pooled[prof.key] = pooled
+            self._research[prof.key] = self.research(works)
             results = [await self._judge(w, prof, p, pooled) for w in works]
             rank = {SignalLabel.STRONG_BUY: 0, SignalLabel.BUY: 1, SignalLabel.WATCH: 2, SignalLabel.NO_TRADE: 3}
             results.sort(key=lambda r: (rank[r.signal], -((r.backtest or {}).get("expectancy_r") or -9)))
@@ -392,6 +406,8 @@ class ScalpService:
                 "variant": self.variant_info.get(prof.key, {"label": "published rules", "source": "default"}),
                 "model": self._model_summary(prof.key),
                 "pooled": stats_out(pooled),
+                "research": [_clean(r.as_dict()) for r in self._research[prof.key].values()],
+                "no_buy_reason": self._no_buy_reason(prof.key, results),
                 "counts": {label.value: sum(1 for r in results if r.signal == label) for label in SignalLabel},
                 "signals": [self.result_out(r) for r in results],
                 "errors": [f"{w.asset.symbol}: {w.error}" for w in works if w.error],
@@ -412,6 +428,51 @@ class ScalpService:
         finally:
             state.running = False
             state.finished_at = utcnow()
+
+    @staticmethod
+    def research(works: list[_Work]) -> dict[str, st.Research]:
+        """Walk-forward check of every strategy, pooled over the scanned coins."""
+        out: dict[str, st.Research] = {}
+        for key in ("pullback", "breakout", *st.LIBRARY):
+            per_coin: dict[str, tuple[list[sc.TradeRecord], datetime | None]] = {}
+            for w in works:
+                if w.stats is None or w.split is None:
+                    continue
+                records = [t for t in w.stats.records if t.kind == key] if key in sc.SETUPS else w.library.get(key, [])
+                per_coin[w.asset.symbol] = (records, w.split)
+            out[key] = st.research(key, per_coin)
+        return out
+
+    def _no_buy_reason(self, horizon: str, results: list[ScalpResult]) -> str | None:
+        if any(r.signal in (SignalLabel.BUY, SignalLabel.STRONG_BUY) for r in results):
+            return None
+        research = self._research.get(horizon, {})
+        valid = [r for r in research.values() if r.validated]
+        fired = [r for r in results if r.plan is not None]
+        if not valid:
+            promising = [r for r in research.values() if (r.all.expectancy_r or 0) > 0 and (r.train.expectancy_r or 0) > 0
+                         and (r.test.expectancy_r or 0) > 0 and r.reasons[0].startswith("only")]
+            if promising:
+                names = ", ".join(f"{r.name} ({r.all.expectancy_r:+.2f}R over {r.all.trades} trades)" for r in promising[:3])
+                text = (f"Promising but not proven yet: {names}. They made money on both parts of the history, but on too "
+                        f"few trades to rule out luck (needs {st.MIN_TRAIN_TRADES} older and {st.MIN_TEST_TRADES} newer "
+                        "trades across the selected coins). Select more coins (Top 20) so the engine has a bigger sample.")
+            else:
+                best = max(research.values(), key=lambda r: r.all.expectancy_r if r.all.expectancy_r is not None else -9,
+                           default=None)
+                text = ("None of the 8 strategies made money after costs on the selected coins at this horizon on both "
+                        "the older and the newer part of the history, so the engine shows no buy. Try another horizon "
+                        "(longer ones pay less in fees), more coins, or lower fees (Portfolio > Risk settings).")
+                if best is not None and best.all.expectancy_r is not None:
+                    text += f" Closest: {best.name}, {best.all.expectancy_r:+.2f}R per trade ({best.reasons[0]})."
+        else:
+            text = f"Validated here: {', '.join(r.name for r in valid)}."
+            if not fired:
+                text += " None of them has a fresh entry on the last candles; setups appear when a candle closes, scan again later."
+        if fired:
+            details = "; ".join(f"{r.symbol} ({(r.strategy or {}).get('name', r.setup)}): {r.reasons[0]}" for r in fired[:3])
+            text += f" {len(fired)} setup(s) fired but were not buys: {details}."
+        return text
 
     async def analyze(self, symbol: str, horizon: str) -> dict[str, Any]:
         """One coin now (uses the pooled record of the last scan at this horizon, if any)."""
@@ -455,7 +516,15 @@ class ScalpService:
         if series is None:
             return base
         is_btc = asset.symbol == "BTC"
-        base.stats = sc.backtest(series, p, is_btc=is_btc)
+
+        def compute() -> tuple[sc.BacktestStats, dict[str, list[sc.TradeRecord]], dict[str, sc.Candidate]]:
+            classic = sc.backtest(series, p, is_btc=is_btc, symbol=asset.symbol)
+            library = {k: st.backtest_key(series, k, p, is_btc=is_btc, symbol=asset.symbol) for k in st.LIBRARY}
+            now = {k: c for k in st.LIBRARY if (c := st.latest(series, k, p, is_btc=is_btc)) is not None}
+            return classic, library, now
+
+        base.stats, base.library, base.library_now = await asyncio.to_thread(compute)
+        base.split = series.candles[int(len(series) * st.TRAIN_FRACTION)].open_time
         last = len(series) - 1
         for k in range(last, max(sc.WARMUP - 1, last - p.fresh_candles), -1):
             cand, _ = sc.evaluate_at(series, k, p, is_btc=is_btc)
@@ -580,7 +649,22 @@ class ScalpService:
         board = w.evidence
         if board is not None:
             result.board = _clean(board.as_dict())
-        cand = w.candidate
+        research = self._research.get(prof.key, {})
+
+        def rank(key: str) -> float:
+            r = research.get(key)
+            return r.test.expectancy_r if r is not None and r.validated and r.test.expectancy_r is not None else -9.0
+
+        options: list[tuple[SignalLabel, float, sc.Candidate, list[str], str]] = []
+        if w.candidate is not None and w.stats is not None:
+            c_label, c_why, c_src = sc.evidence(w.stats, w.candidate.kind, p, pooled)
+            options.append((c_label, rank(w.candidate.kind), w.candidate, c_why, c_src))
+        for key, lib_cand in w.library_now.items():
+            l_label, l_why = st.verdict(key, w.library.get(key, []), research.get(key))
+            options.append((l_label, rank(key), lib_cand, l_why, "research"))
+        options.sort(key=lambda o: (o[0].rank, o[1]), reverse=True)
+        cand = options[0][2] if options else None
+        validated = [r.name for r in research.values() if r.validated]
         if cand is None or w.stats is None:
             result.signal = SignalLabel.WATCH if w.context_ok else SignalLabel.NO_TRADE
             pend = w.pending
@@ -603,19 +687,28 @@ class ScalpService:
             else:
                 result.status = "trend not right" if not w.context_ok else "waiting"
                 result.reasons = (["trend context is right; waiting for an entry trigger"] if w.context_ok else []) + w.why[:3]
+            if validated:
+                result.reasons.append(f"validated strategies at this horizon: {', '.join(validated)} (none fired on this coin now)")
             if board is not None:
                 result.risks = [f"evidence: {n}" for n in board.notes]
             result.summary = f"{result.signal.value}: {result.reasons[0] if result.reasons else 'no setup'}"
             return result
 
-        label, evidence_reasons, source = sc.evidence(w.stats, cand.kind, p, pooled)
+        label, evidence_reasons, source = options[0][0], list(options[0][3]), options[0][4]
+        strategy = st.STRATEGIES[cand.kind]
+        spec = strategy.exit
+        hold = max(1, int(round(prof.max_hold * (spec.hold_mult if cand.kind in st.LIBRARY else p.hold_mult))))
+        result.strategy = {"key": strategy.key, "name": strategy.name, "family": strategy.family, "source": strategy.source,
+                           "rule": strategy.rule, "hold": hold,
+                           "spec": spec.as_dict() if cand.kind in st.LIBRARY else None, "target": cand.level}
+        result.also = [f"{st.STRATEGIES[o[2].kind].name}: {humanize_label(o[0])}" for o in options[1:]]
         raw = label  # the label without the filters below (so a held-back setup can be tracked)
         filtered_by: str | None = None
         filter_reasons: list[str] = []  # why a filter held the setup back (shown first)
         result.evidence = source
         result.variant = p.variant
         model = self.models.get(prof.key)
-        if model is not None and w.features is not None:
+        if model is not None and w.features is not None and cand is w.candidate:
             probability = model.probability(w.features)
             used = model.validated and self.ml_enabled.get(prof.key, True)
             result.ml = {"probability": probability, "threshold": model.threshold, "validated": model.validated,
@@ -646,6 +739,12 @@ class ScalpService:
         loss_pct = cand.risk_pct + p.cost_pct
         allocation = min(risk.max_risk_per_signal_pct / loss_pct * 100.0, risk.max_allocation_pct)
         valid_until = cand.time + timedelta(seconds=prof.setup.seconds * p.fresh_candles)
+        if cand.kind in st.LIBRARY:
+            exit_rule = st.exit_text(spec, cand.entry, cand.stop, cand.level)
+        else:
+            exit_rule = (f"sell {p.tp1_share * 100:.0f}% at TP1 {fmt_price(cand.tp1)}"
+                         + (", then move the stop to the entry" if p.breakeven else "")
+                         + (f"; the rest at TP2 {fmt_price(cand.tp2)}" if p.tp1_share < 1 else ""))
         result.plan = ScalpPlan(
             entry=cand.entry,
             entry_low=cand.entry - 0.3 * r_unit,
@@ -660,7 +759,8 @@ class ScalpService:
             suggested_allocation_pct=allocation,
             risk_at_allocation_pct=allocation * loss_pct / 100.0,
             valid_until=valid_until,
-            time_exit=f"close the rest after {prof.hold_minutes} minutes ({prof.max_hold} x {prof.setup.label} candles)",
+            time_exit=f"close the rest after {hold * prof.setup.minutes} minutes ({hold} x {prof.setup.label} candles)",
+            exit_rule=exit_rule,
         )
         if now > valid_until + timedelta(seconds=prof.setup.seconds) and label.rank > SignalLabel.WATCH.rank:
             label = SignalLabel.WATCH
@@ -689,6 +789,8 @@ class ScalpService:
         reasons: list[str] = []
         risks: list[str] = []
         price = w.price
+        # USD value of the quote asset (liquidity checks); a USD stablecoin counts as 1 if its rate is missing
+        usd = w.quote_usd_rate or (1.0 if (w.quote_asset or "").upper() in USD_STABLE_QUOTES else 0.0)
         r_unit = cand.entry - cand.stop
         if price is None:
             cap = SignalLabel.NO_TRADE
@@ -711,14 +813,14 @@ class ScalpService:
             if book.spread_bps is not None and book.spread_bps > risk.max_spread_bps:
                 cap = SignalLabel.NO_TRADE
                 reasons.append(f"spread {book.spread_bps:.1f} bps above the {risk.max_spread_bps:g} bps limit")
-            depth = min(book.bid_depth_quote or 0.0, book.ask_depth_quote or 0.0) * (w.quote_usd_rate or 0.0)
+            depth = min(book.bid_depth_quote or 0.0, book.ask_depth_quote or 0.0) * usd
             if depth < risk.min_depth_usd:
                 cap = SignalLabel.NO_TRADE
                 reasons.append(f"order book too thin (${depth:,.0f} on the thinner side)")
             if book.imbalance is not None and book.imbalance <= risk.min_book_imbalance_strong:
                 cap = cap.cap(SignalLabel.BUY)
                 risks.append(f"sellers dominate the order book (imbalance {book.imbalance:+.2f})")
-        volume_usd = (w.volume_24h_quote or 0.0) * (w.quote_usd_rate or 0.0)
+        volume_usd = (w.volume_24h_quote or 0.0) * usd
         if volume_usd < risk.min_volume_24h_usd:
             cap = SignalLabel.NO_TRADE
             reasons.append(f"24h volume ${volume_usd:,.0f} below the ${risk.min_volume_24h_usd:,.0f} minimum")
@@ -786,8 +888,11 @@ class ScalpService:
                                                   "evidence_source": r.evidence, "horizon": prof.key,
                                                   "evidence": evidence_record(r.board), "ml": r.ml}),
                         quant_output=_jsonable({"backtest": {k: v for k, v in (r.backtest or {}).items() if k != "recent"},
-                                                "max_hold": prof.max_hold, "filtered_by": r.filtered_by,
-                                                "would_be": r.would_be}),
+                                                "max_hold": (r.strategy or {}).get("hold", prof.max_hold),
+                                                "filtered_by": r.filtered_by, "would_be": r.would_be,
+                                                "strategy": (r.strategy or {}).get("key"),
+                                                "exit": (r.strategy or {}).get("spec"),
+                                                "target": (r.strategy or {}).get("target")}),
                     )
                     session.add(signal)
                     await session.flush()

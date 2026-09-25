@@ -42,6 +42,7 @@ TRACK_TIMEFRAME = {
     "scalp_15m": Timeframe.M5,
     "scalp_1h": Timeframe.M15,
     "scalp_4h": Timeframe.H1,
+    "scalp_1d": Timeframe.H4,
 }
 SWING_MAX_HOLD_HOURS = 14 * 24
 BUY_LABELS = ("BUY", "STRONG BUY")
@@ -51,6 +52,7 @@ STRATEGY_LABELS = {
     "scalp_15m": "Scalp 15m",
     "scalp_1h": "Trade 1h",
     "scalp_4h": "Trade 4h",
+    "scalp_1d": "Trade 1d",
 }
 
 
@@ -185,12 +187,26 @@ class OutcomeTracker:
             return None  # no candle after the signal yet
         if candles[0].open_time > created + timedelta(seconds=candles[0].timeframe.seconds):
             return None  # these candles start after the signal: cannot follow it from the start
-        total = math.fsum(t.allocation_pct or 0 for t in targets) or 100.0
-        sim_targets = [SimTarget(t.price, (t.allocation_pct or 0) / total) for t in targets if t.price > entry]
-        if not sim_targets:
-            return None
+        quant = signal.quant_output if isinstance(signal.quant_output, dict) else {}
+        trail = exit_signal = None
+        breakeven = True
+        if isinstance(quant.get("exit"), dict):  # a library strategy: the same exit rules as its backtest
+            from app.analysis.strategies import ExitRules, ExitSpec, sim_targets as spec_targets
+
+            spec = ExitSpec.from_dict(quant["exit"])
+            sim_targets = spec_targets(entry, stop, spec, quant.get("target"))
+            trail, exit_signal = ExitRules(candles).functions(spec, start - 1)
+            breakeven = spec.breakeven
+            if not sim_targets and trail is None and exit_signal is None:
+                return None
+        else:
+            total = math.fsum(t.allocation_pct or 0 for t in targets) or 100.0
+            sim_targets = [SimTarget(t.price, (t.allocation_pct or 0) / total) for t in targets if t.price > entry]
+            if not sim_targets:
+                return None
         res = simulate_long(candles, start, entry=entry, stop=stop, targets=sim_targets,
-                            cost_pct=cost_pct, max_hold=_max_hold(signal))
+                            cost_pct=cost_pct, max_hold=_max_hold(signal), breakeven_after_first=breakeven,
+                            trail=trail, exit_signal=exit_signal)
         if res.outcome == OPEN or res.exit_time is None:
             return None
         return SignalOutcome(

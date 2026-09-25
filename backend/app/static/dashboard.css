@@ -726,4 +726,12 @@ tr.chosen td { background: color-mix(in srgb, var(--f-lab) 8%, var(--surface)); 
 .inline-select select { font-size: 12px; padding: 3px 6px; max-width: 220px; }
 #ev-market-body .detail-grid { margin-bottom: 6px; }
 
+/* strategy library (phase 11) */
+.why-none { border-left-color: var(--warning); font-size: 13px; }
+.research summary { cursor: pointer; padding: 4px 0 8px; }
+#scalp-research-body { overflow-x: auto; }
+@media (max-width: 640px) { .research .rule-text { display: none; } #scalp-research-body table { min-width: 460px; } }
+.research table td .small { line-height: 1.35; }
+.strategy-box p { margin: 2px 0; }
+
 .kill-banner[hidden], [hidden] { display: none !important; }
