@@ -42,7 +42,9 @@ You get ONE trade signal produced by a deterministic engine, with its data (SIGN
 Look for concrete reasons the trade could fail that the engine may have underweighted:
 weak or small-sample backtest, price extended above its averages, resistance close above,
 thin liquidity or a wide spread, timeframes disagreeing, crowded funding, token unlocks,
-negative news tone, Bitcoin weakness, a stop that is too tight for costs.
+negative news tone, Bitcoin weakness, a stop that is too tight for costs. When an evidence board is
+included (futures funding, open interest, long/short ratios, top traders, liquidations and the
+estimated liquidation map, order flow, news and hype, market), weigh its factors too.
 
 Rules:
 - Use only the data in SIGNAL. Never invent prices, news, or statistics.
@@ -65,10 +67,24 @@ def _trim(value: Any, depth: int = 0) -> Any:
         drop = {"indicators", "structure", "equity", "recent", "records", "pipeline", "candles", "by_hour_utc", "by_weekday"}
         return {k: _trim(v, depth + 1) for k, v in value.items() if k not in drop and v is not None}
     if isinstance(value, list):
-        return [_trim(v, depth + 1) for v in value[:8]]
+        return [_trim(v, depth + 1) for v in value[:24 if value and isinstance(value[0], str) else 8]]
     if isinstance(value, float):
         return float(f"{value:.6g}")
     return value
+
+
+def compact_board(board: Any) -> Any:
+    """The evidence board as short lines (the full board with its liquidation map is too long)."""
+    if not isinstance(board, dict) or not isinstance(board.get("factors"), list):
+        return board
+    sign = {1: "+", -1: "-", 0: "0"}
+    return {
+        "score": board.get("score"), "grade": board.get("grade"), "vetoes": board.get("vetoes"),
+        "notes": (board.get("notes") or [])[:4],
+        "factors": [f"{sign.get(f.get('direction'), '0')} {f.get('label')}: {f.get('value')} ({f.get('detail')})"
+                    for f in board["factors"] if isinstance(f, dict)][:24],
+        "missing": board.get("missing"),
+    }
 
 
 def parse_review(text: str) -> dict[str, Any]:
@@ -187,6 +203,7 @@ class AIReviewService:
             raise ChatUnavailable("emergency stop is engaged", 503)
         if not self._chat.configured:
             raise ChatUnavailable("OPENAI_API_KEY is not set on the server")
+        signal = {k: (compact_board(v) if k in ("evidence", "board") else v) for k, v in signal.items()}
         context = json.dumps(_trim(signal), default=str, separators=(",", ":"))[:MAX_CONTEXT_CHARS]
         messages = [
             {"role": "system", "content": REVIEW_PROMPT},

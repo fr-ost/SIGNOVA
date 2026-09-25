@@ -33,6 +33,7 @@ ALLOW_ANY_PREFIX = (
 ALLOW_GET = {
     "/", "/health", "/api", "/api/docs", "/api/openapi.json", "/api/control/status", "/api/system/state",
     "/api/performance", "/api/signals", "/api/signals/history", "/api/scalp", "/api/lab", "/api/ml",
+    "/api/evidence/settings", "/api/evidence/learning",
 }
 
 

@@ -20,13 +20,14 @@ Nothing in this project promises profitability or accuracy.
 | 7 | OpenAI reasoning layer | **Done**: AI chat assistant and AI review of signals (can only lower a signal) |
 | 8 | Signal tracking, backtesting, statistics | **Done**: track record, per-coin backtests, Strategy lab (walk-forward test of rule variants) |
 | 9 | ML / statistical prediction | **Done**: statistical trade filter, used only after it validates on newer data |
+| 10 | Evidence engine | **Done**: futures positioning, liquidations and an estimated liquidation map, order flow, news read by the AI, hype, market trend; tracks the setups it holds back and learns from outcomes |
 
 ## Decision hierarchy
 
 ```
 data integrity -> fail-safe validation -> deterministic calculations -> risk engine
--> quantitative signal engine -> statistical/ML evidence -> OpenAI reasoning
--> final deterministic validation -> dashboard
+-> quantitative signal engine -> evidence board (futures, flow, news, market; can only lower)
+-> statistical/ML evidence -> OpenAI reasoning -> final deterministic validation -> dashboard
 ```
 
 The LLM can never override stale data, source conflicts, missing candles, abnormal prices,
@@ -275,6 +276,65 @@ and *breakout* (a close above the 20-candle high on volume).
 
 `POST /api/scalp/scan?horizon=1h` (token), `GET /api/scalp?horizon=1h`, `GET /api/scalp/{symbol}?horizon=4h` (token).
 
+## Evidence engine (Phase 10)
+
+The chart setup and its backtest decide *whether* a coin can be a buy and how strong. The
+evidence board then checks everything else that moves crypto prices, and can only hold a buy
+back (never create or raise one). Every swing signal (coin panel) and every scalp row shows its
+board: a score from −100 (strongly against) to +100 (strongly for), each factor with its value,
+what it means and where the data came from, and any veto.
+
+| Group | Factors |
+|---|---|
+| Futures positioning | funding rate (crowded longs pay a lot), open interest versus price (new money or short covering), the crowd's long/short ratio (contrarian at extremes), **top traders ("whales")** adding or cutting longs, futures taker buying, **recent liquidations** (a long flush that ended, or a cascade still running), the **estimated liquidation map** |
+| Order flow | spot taker buying on the signal candles, CVD divergence (price up while sellers hit the market), 24h volume versus its 20-day average, order-book imbalance, strength versus Bitcoin over 7 days |
+| News and hype | critical headlines (hack, exploit, delisting, insolvency, halted withdrawals, charges), headline tone or the **AI's reading of the headlines**, catalysts (major-exchange listing, ETF, mainnet, integration), **hype** (headline count versus the coin's usual, CoinGecko trending) with a warning when hype meets a stretched price |
+| Market | Bitcoin's 4H and 1D trend (for altcoins), market breadth, leverage across the market (average funding, crowded coins), Fear & Greed extremes, stablecoin supply, altcoin season |
+| Events | large token unlocks, whale exchange inflows/outflows (BTC/ETH on-chain) |
+
+**Futures data** is public and keyless: Binance futures first, then Bybit, OKX and Hyperliquid
+for whatever a blocked or missing exchange cannot answer (many cloud regions are refused by
+Binance or Bybit; an exchange that refuses the region is skipped for an hour). Liquidation
+orders come from OKX (a sample of the market, labelled so). Provider health lists each exchange.
+The **Evidence engine** card's *Load futures positioning* shows the market-wide view.
+
+**Liquidation map** (estimate, labelled everywhere): every hour open interest rose in the last
+7 days, new positions were opened near that hour's price; they are split into longs and shorts
+by the long/short ratio and spread over typical leverage (5x-100x); later candles that traded
+through a level remove it. Long liquidations below the price are forced selling if it falls
+there, short liquidations above are forced buying if it rises there. The board says when more
+fuel sits above than below, and when a cluster of long liquidations sits at your stop it
+suggests a stop just under that zone.
+
+**How it changes a signal** (mode *filter*, the default; *advisory* only shows it; *off*):
+* a veto caps the buy at WATCH: critical news about the coin, a large unlock within 3 days,
+  a long-liquidation cascade still running, or extreme funding while open interest jumped;
+* a board at −25 or lower (strong headwinds, 4+ factors with data) caps it at WATCH;
+* a board at −8 or lower turns STRONG BUY into BUY.
+
+**AI in the engine:** with an OpenAI key, one request per new set of headlines reads them all
+and rates each coin's news from −2 to +2 and flags critical events (cached 45 minutes; switch
+in the Evidence engine card). The AI can clear a keyword false alarm (for example a hack of a
+*different* project) but its reading never raises a signal. The AI reviewer (Phase 7) now also
+sees the evidence board.
+
+**Learning from outcomes:** a setup the board (or the learned model, or the statistical filter)
+holds back is stored as FILTERED and followed exactly like a shown buy, in its own lane. The
+Track record then shows what the held-back setups did (a filter helps when they did worse) and
+results by board grade; the Evidence engine card shows each factor's measured edge (average
+result when it argued for the trade versus against it). Once 90 setups with a board have
+closed, a logistic model is trained on the older 70% and validated on the newer 30% (same rules
+as Phase 9); only a validated model joins the filter, it can only lower a buy, and you can
+switch it off. Until then the documented prior weights are used and nothing is claimed.
+
+What it cannot do: there is no free source for social-media volume, real per-trader leverage, or
+exchange order flow beyond these APIs; the liquidation map is an estimate; and none of it
+guarantees a win rate. It removes trades with visible headwinds and measures itself.
+
+`GET /api/evidence/settings`, `PUT` (`{"mode": "filter", "refresh_news": true, "ai_news": true}`, token),
+`GET /api/evidence/{symbol}?horizon=swing`, `GET /api/evidence/learning`, `POST /api/evidence/learning/refresh` and
+`PUT /api/evidence/learning` (`{"enabled": false}`, token), `GET /api/derivatives/market`, `GET /api/derivatives/{symbol}`.
+
 ## Strategy lab (Phase 8)
 
 The published scalp rules are a starting point, not the best rules for every market. The
@@ -282,10 +342,12 @@ Strategy lab card tests alternatives on *your* coins' real history and tells you
 whether any of them is better. Pick a horizon and press **Run the lab** (token; it runs in the
 background, takes a few minutes, and uses the same candles as a scalp scan, no extra credits).
 
-* **Grid:** 6 entry filters (published rules, volume-confirmed pullbacks, ADX 20+, stop at least
-  3.5x costs away, pullbacks only, breakouts only) x 6 exit styles (targets 1R/2R, 1R/3R,
-  1.5R/3R, no break-even, all at 1.5R, double time limit) = 36 variants. The grid is small on
-  purpose: the more variants one tries, the more likely the best-looking one is luck.
+* **Grid:** 8 entry filters (published rules, volume-confirmed pullbacks, ADX 20+, stop at least
+  3.5x costs away, pullbacks only, breakouts only, buyers in control at the trigger (taker
+  buying 52%+ of the last 3 candles' volume), coin stronger than Bitcoin) x 6 exit styles
+  (targets 1R/2R, 1R/3R, 1.5R/3R, no break-even, all at 1.5R, double time limit) = 48 variants.
+  The grid is small on purpose: the more variants one tries, the more likely the best-looking
+  one is luck.
 * **Walk-forward split:** each coin's history is split in time. The older 70% chooses the
   variant; the newer 30%, never used for choosing, tests it.
 * **Acceptance:** the variant is applied to the scalp engine only if it earned at least +0.05R
@@ -303,10 +365,11 @@ The applied variant and the last result are stored in `app_settings` and survive
 ## Statistical trade filter (Phase 9)
 
 Each lab run also trains a small logistic-regression model on the chosen variant's trades. It
-estimates the chance that a setup ends as a winner (net of costs) from 17 numbers known when the
+estimates the chance that a setup ends as a winner (net of costs) from 19 numbers known when the
 signal candle closes: trend strength (ADX, distance from the EMAs, higher-timeframe RSI and
 momentum), volatility (ATR, Bollinger width), volume, RSI, distance to the 20-candle high,
-Bitcoin's momentum, the stop distance versus costs, the setup type and the hour of day. It is
+Bitcoin's momentum, order flow (taker buying, net volume delta), the stop distance versus
+costs, the setup type and the hour of day. It is
 pure Python (no machine-learning libraries, little memory).
 
 It is honest by construction: it is trained on the older trades and judged only on the newer
@@ -357,7 +420,8 @@ coin and strategy is still running is marked SKIPPED, so one move is never count
 uses candles the analysis already fetched, so it costs no extra API calls. The card shows win
 rate, average R, total R and profit factor per strategy for the last 90 days
 (`GET /api/performance?days=90`). This is the honest measure of accuracy: unlike a backtest,
-nothing in it was known when the rules were written.
+nothing in it was known when the rules were written. It also groups results by evidence-board
+grade and shows, separately, what the setups held back by a filter would have made.
 
 ## About accuracy and "$50 a day"
 
@@ -369,6 +433,12 @@ portfolio; $50 a day then needs about $25,000 per trade-a-day (for example $5,00
 trades every day), and results vary a lot from day to day. Raising risk per trade to reach a
 target faster is the usual way accounts are lost. Start with small sizes, watch the Track record
 for a few weeks, and trust only what it shows.
+
+More inputs do not automatically mean more accuracy: every extra factor can also add noise.
+That is why the evidence board only ever holds trades back, why the setups it holds back are
+tracked, and why its learned model must prove itself on newer outcomes before it filters
+anything. Read the "By evidence board" and "Held back by filters" tables after a few weeks: they
+tell you whether the extra data is helping on your coins.
 
 ## Manual control (Phase 3)
 
@@ -507,7 +577,7 @@ adding a key.
 
 Set `ADMIN_TOKEN` on Railway. Then Analyze now, Stop, Auto-analyze, live prices, watchlist
 changes, the AI chat and AI reviews (they spend your OpenAI credits), scalp scans, the Strategy
-lab, the emergency stop and resume, and the portfolio all require it. The
+lab, evidence-engine settings, the emergency stop and resume, and the portfolio all require it. The
 dashboard asks for it once and keeps it in your browser. Public market data stays readable.
 Without `ADMIN_TOKEN`, anyone who finds the URL can use those controls.
 
@@ -543,6 +613,10 @@ Without `ADMIN_TOKEN`, anyone who finds the URL can use those controls.
 | `POST /api/control/kill`, `POST /api/control/resume` (token) | Emergency stop and resume |
 | `GET /api/lab?horizon=1h`, `POST /run` · `/apply` · `/reset` (token) | Phase 8: Strategy lab result, run, apply or reset a rule variant |
 | `GET /api/ml?horizon=1h`, `PUT` (token) | Phase 9: statistical filter state and validation; switch it off or on |
+| `GET/PUT /api/evidence/settings` (PUT: token) | Phase 10: evidence board mode (filter / advisory / off), headline refresh, AI news reading |
+| `GET /api/evidence/{symbol}?horizon=swing\|15m\|1h\|4h` | Phase 10: the latest evidence board for a coin (never fetches) |
+| `GET /api/evidence/learning`, `POST /refresh`, `PUT` (token) | Phase 10: measured edge per factor, held-back results, learned model |
+| `GET /api/derivatives/market`, `GET /api/derivatives/{symbol}` | Phase 10: futures funding, open interest, long/short ratios, taker flow, liquidations |
 | `POST /api/ai/review` (token) | Phase 7: AI review of a scalp or swing signal (agree / caution / reject) |
 | `GET/PUT /api/ai/settings` (PUT: token) | AI review mode (advisory / filter) and auto-review |
 | `POST /api/chat` | AI assistant (token); optional `model` and `reasoning_effort` |
@@ -672,6 +746,11 @@ plans, the emergency stop (allowlist, graceful stop, persistence), watchlist rem
 Strategy lab split and acceptance rule, the statistical filter (validation gates, no future data
 in its features, filtering only when validated) and AI review (JSON parsing, advisory and filter
 modes, auto-review, storage and the by-verdict record), on SQLite and PostgreSQL.
+Phase 10: every exchange parser against its documented payload (errors, 1000x contracts),
+exchange failover and region skipping, OKX USD open interest, the liquidation map (levels,
+crossed levels removed, long/short split), each evidence factor and veto, thin boards,
+learning (a predictive factor validates, random factors never do), held-back setups tracked in
+their own lane, and the swing and scalp integration.
 Fake adapters and synthetic markets exist only in `backend/tests`; production code never
 generates data.
 
@@ -714,5 +793,9 @@ simulator), `services/scalp.py`, `services/outcomes.py` (track record),
 Phase 7: `services/ai_review.py`;
 Phase 8: `analysis/lab.py` (variant grid, walk-forward split, statistics), `services/lab.py`;
 Phase 9: `analysis/ml.py` (logistic regression and its validation);
+Phase 10: `data/derivatives.py` (exchange parsers), `services/derivatives.py` (failover, cache),
+`analysis/liqmap.py` (liquidation map), `analysis/evidence.py` (factors, score, vetoes),
+`analysis/evidence_learn.py` and `services/learning.py` (learning from outcomes),
+`services/evidence.py`, `services/ai_news.py` (the AI reads the headlines);
 `services/settings_store.py` (small JSON settings in `app_settings`);
 routes in `api/controls.py`.

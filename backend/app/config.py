@@ -62,7 +62,7 @@ class Settings(BaseSettings):
 
     # --- application ---------------------------------------------------------
     app_name: str = "Crypto Market Analysis & Spot Signal Dashboard"
-    app_version: str = "0.9.0-phase9"
+    app_version: str = "1.0.0-phase10"
     environment: Literal["development", "test", "production"] = "development"
     log_level: str = "INFO"
     json_logs: bool = True
@@ -224,6 +224,18 @@ class Settings(BaseSettings):
     scalp_min_risk_cost_multiple: float = 2.5  # the stop must be at least this many round-trip costs away
     scalp_min_trades: int = 15  # backtest trades a coin needs before its own record counts
     track_record_days: int = 90
+
+    # --- Phase 10: evidence board (derivatives, flow, news, hype, market) ------------------
+    derivatives_enabled: bool = True  # public futures data from Binance, Bybit, OKX, Hyperliquid
+    bybit_base_url: str = "https://api.bybit.com"
+    okx_base_url: str = "https://www.okx.com"
+    hyperliquid_info_url: str = "https://api.hyperliquid.xyz/info"
+    derivatives_cache_seconds: int = 300
+    derivatives_history_hours: int = 168  # open interest and ratio history for the liquidation map
+    derivatives_concurrency: int = 4  # parallel requests per exchange
+    evidence_news_max_age_minutes: int = 30  # scans reload headlines older than this (free sources)
+    evidence_refresh_news_default: bool = True  # the dashboard switch "reload headlines before scans"
+    ai_news_cache_minutes: int = 45  # the AI reading of the headlines is reused this long
 
     # --- token unlocks and airdrops (optional keys) -------------------------------------
     events_cache_seconds: int = 21600

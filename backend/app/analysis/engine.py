@@ -110,6 +110,9 @@ class AnalysisResult:
     feature_version: str = FEATURE_VERSION
     strategy: str = STRATEGY
     setup_timeframe: Timeframe = SETUP_TIMEFRAME
+    evidence: dict | None = None  # Phase 10 evidence board (set by the analysis service)
+    filtered_by: str | None = None  # the filter that held a buy back
+    would_be: str | None = None  # the label before that filter
 
 
 def _analysis_check(

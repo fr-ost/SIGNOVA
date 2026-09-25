@@ -578,6 +578,9 @@ class AnalysisOut(_Model):
     persistence: str
     sentiment: dict[str, Any] | None = Field(None, description="Phase 5 context: news tone, funding, exchange flows")
     ai_review: dict[str, Any] | None = Field(None, description="Phase 7: the AI reviewer's verdict, if requested")
+    evidence: dict[str, Any] | None = Field(None, description="Phase 10: evidence board (futures, flow, news, market)")
+    filtered_by: str | None = Field(None, description="Phase 10: the filter that held a buy back, if any")
+    would_be: str | None = Field(None, description="Phase 10: the label before that filter")
     disclaimer: str = DISCLAIMER
 
 
@@ -603,6 +606,8 @@ class SignalSummaryOut(_Model):
     reasons: list[str]
     watchlist: bool = False
     ai_review: dict[str, Any] | None = None  # Phase 7: the AI reviewer's verdict, if one was requested
+    evidence_score: float | None = None  # Phase 10: evidence board score (-100..+100)
+    evidence_grade: str | None = None
 
 
 class SignalScanOut(_Model):

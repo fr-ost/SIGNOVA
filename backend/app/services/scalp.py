@@ -34,6 +34,7 @@ from app.core.timeutil import utcnow
 from app.data.normalization.schemas import Candle
 from app.models import ModelPrediction, Signal, SignalTarget
 from app.services.settings_store import SettingsStore
+from app.services.analysis import evidence_record
 from app.services.assets import AssetService
 from app.services.spot_router import NoMarketData, SpotMarketRouter
 from app.services.universe import UniverseAsset, UniverseService
@@ -92,6 +93,9 @@ class ScalpResult:
     ml: dict[str, Any] | None = None  # the statistical filter's view of this setup
     pending: dict[str, Any] | None = None  # conditional levels while waiting for a trigger
     if_triggered: str | None = None  # the label the evidence would allow if the pending setup triggers
+    board: dict[str, Any] | None = None  # Phase 10 evidence board
+    filtered_by: str | None = None  # the filter that held a buy back (evidence | learned | ml)
+    would_be: str | None = None  # the label before that filter
 
 
 @dataclass
@@ -113,6 +117,7 @@ class _Work:
     error: str | None = None
     pending: sc.Pending | None = None
     features: dict[str, float] | None = None  # market at the setup candle (for the statistical filter)
+    evidence: Any = None  # app.analysis.evidence.Evidence
 
 
 @dataclass
@@ -197,6 +202,8 @@ class ScalpService:
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._stopping = False
         self.after_scan: Callable[[str, dict[str, Any]], Any] | None = None  # automatic AI review
+        self.evidence: Any = None  # Phase 10 evidence board service (set by the container)
+        self.market_regime: Callable[[], Any] | None = None  # the market regime (async), for the board
         self.states: dict[str, ScanState] = {h: ScanState(h) for h in sc.PROFILES}
         self.results: dict[str, dict[str, Any]] = {}
         self._pooled: dict[str, sc.BacktestStats] = {}
@@ -339,6 +346,11 @@ class ScalpService:
             state.total = len(assets)
             p = self.params(prof.key)
             btc = await self.btc_trend(prof, universe.assets)
+            if self.evidence is not None:
+                try:
+                    await self.evidence.prepare([a.symbol for a in assets])
+                except Exception:
+                    log.warning("evidence preparation failed", exc_info=True)
             semaphore = asyncio.Semaphore(max(1, self._s.signal_scan_concurrency))
 
             async def one(asset: UniverseAsset) -> _Work:
@@ -456,10 +468,48 @@ class ScalpService:
         if base.candidate is None:
             base.pending = sc.pending_plan(series, last, p, is_btc=is_btc)
         base.context_ok = series.trend_up[last] and not series.filter_down[last] and (is_btc or not series.btc_down[last])
+        if self.evidence is not None:
+            try:
+                base.evidence = await self._board(asset, prof, series, setup, collection, base)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # context only: the coin is judged without it
+                log.exception("evidence board failed", extra={"symbol": asset.symbol})
         if self._on_candles is not None:
             with contextlib.suppress(Exception):
                 await self._on_candles(asset.symbol, {prof.setup: setup})
         return base
+
+    async def _board(self, asset: UniverseAsset, prof: sc.ScalpProfile, series: sc.ScalpSeries, setup: list[Candle],
+                     collection: Any, w: _Work) -> Any:
+        last = len(series) - 1
+        levels: tuple[float | None, float | None, float | None, float | None] = (None, None, None, None)
+        if w.candidate is not None:
+            c = w.candidate
+            levels = (c.entry, c.stop, c.tp1, c.tp2)
+        elif w.pending is not None:
+            pend = w.pending
+            levels = (pend.trigger, pend.stop, pend.tp1, pend.tp2)
+        ticker = collection.ticker
+        atr = series.atr[last]
+        book = collection.book
+        return await self.evidence.for_coin(
+            asset.symbol, horizon=prof.key, price=w.price, market=await self._market(),
+            h1=collection.closed.get(Timeframe.H1, []), setup=setup, d1=collection.closed.get(Timeframe.D1, []),
+            entry=levels[0], stop=levels[1], tp1=levels[2], tp2=levels[3],
+            volume_24h_quote=ticker.volume_quote_24h if ticker else None,
+            change_24h_pct=ticker.pct_change_24h if ticker else None, rsi=series.rsi[last],
+            atr_pct=(atr / series.close[last] * 100.0) if atr and series.close[last] else None,
+            book_imbalance=book.imbalance if book is not None and book.valid else None,
+        )
+
+    async def _market(self) -> Any:
+        if self.market_regime is None:
+            return None
+        try:
+            return await self.market_regime()
+        except Exception:
+            return None
 
     async def load_series(
         self, asset: UniverseAsset, prof: sc.ScalpProfile, btc: list[Candle] | None, collection: Any = None
@@ -527,6 +577,9 @@ class ScalpService:
             result.summary = f"NO TRADE: {result.reasons[0]}"
             result.status = "data check failed"
             return result
+        board = w.evidence
+        if board is not None:
+            result.board = _clean(board.as_dict())
         cand = w.candidate
         if cand is None or w.stats is None:
             result.signal = SignalLabel.WATCH if w.context_ok else SignalLabel.NO_TRADE
@@ -536,6 +589,9 @@ class ScalpService:
                 verdict, evidence_reasons, source = sc.evidence(w.stats, kind, p, pooled)
                 if not pend.fees_ok:
                     verdict = SignalLabel.NO_TRADE
+                if self.evidence is not None and board is not None:
+                    verdict, why, _ = self.evidence.apply(verdict, board, prof.key)
+                    evidence_reasons = why + evidence_reasons
                 result.pending = _clean(asdict(pend))
                 result.if_triggered = verdict.value
                 result.setup = f"{pend.kind} (waiting)"
@@ -547,10 +603,15 @@ class ScalpService:
             else:
                 result.status = "trend not right" if not w.context_ok else "waiting"
                 result.reasons = (["trend context is right; waiting for an entry trigger"] if w.context_ok else []) + w.why[:3]
+            if board is not None:
+                result.risks = [f"evidence: {n}" for n in board.notes]
             result.summary = f"{result.signal.value}: {result.reasons[0] if result.reasons else 'no setup'}"
             return result
 
         label, evidence_reasons, source = sc.evidence(w.stats, cand.kind, p, pooled)
+        raw = label  # the label without the filters below (so a held-back setup can be tracked)
+        filtered_by: str | None = None
+        filter_reasons: list[str] = []  # why a filter held the setup back (shown first)
         result.evidence = source
         result.variant = p.variant
         model = self.models.get(prof.key)
@@ -560,52 +621,28 @@ class ScalpService:
             result.ml = {"probability": probability, "threshold": model.threshold, "validated": model.validated,
                          "used": used}
             if used and probability < model.threshold and label.rank > SignalLabel.WATCH.rank:
-                label = SignalLabel.WATCH
-                evidence_reasons = evidence_reasons + [
+                label, filtered_by = SignalLabel.WATCH, "ml"
+                filter_reasons.append(
                     f"statistical filter: win probability {probability * 100:.0f}% is below its {model.threshold * 100:.0f}% "
-                    "threshold (validated on newer trades)"]
+                    "threshold (validated on newer trades)")
             await self._record_prediction(w.asset.symbol, prof, cand, model, probability)
+        if self.evidence is not None and board is not None:
+            new, why, by = self.evidence.apply(label, board, prof.key)
+            if new != label:
+                label, filtered_by = new, filtered_by or by
+                filter_reasons.extend(why)
         result.setup, result.setup_time = cand.kind, cand.time
-        reasons = list(cand.reasons) + evidence_reasons
-        risks: list[str] = []
-        price = w.price
-        r_unit = cand.entry - cand.stop
-        if price is None:
-            label = SignalLabel.NO_TRADE
-            reasons.insert(0, "live price unavailable")
-        elif price <= cand.stop:
-            label = SignalLabel.NO_TRADE
-            reasons.insert(0, f"invalidated: price {fmt_price(price)} is at or below the stop {fmt_price(cand.stop)}")
-        elif price >= cand.tp1:
-            label = label.cap(SignalLabel.WATCH)
-            reasons.insert(0, f"missed: price {fmt_price(price)} already reached TP1 {fmt_price(cand.tp1)}")
-        elif price > cand.entry + p.max_chase_r * r_unit:
-            label = label.cap(SignalLabel.WATCH)
-            reasons.insert(0, f"price ran {(price - cand.entry) / r_unit:.2f}R above the signal entry: "
-                              f"wait for a retest of {fmt_price(cand.entry)} or skip")
-        book = w.book
-        if book is None or not book.valid:
-            label = SignalLabel.NO_TRADE
-            reasons.insert(0, "order book unavailable")
-        else:
-            if book.spread_bps is not None and book.spread_bps > risk.max_spread_bps:
-                label = SignalLabel.NO_TRADE
-                reasons.insert(0, f"spread {book.spread_bps:.1f} bps above the {risk.max_spread_bps:g} bps limit")
-            depth = min(book.bid_depth_quote or 0.0, book.ask_depth_quote or 0.0) * (w.quote_usd_rate or 0.0)
-            if depth < risk.min_depth_usd:
-                label = SignalLabel.NO_TRADE
-                reasons.insert(0, f"order book too thin (${depth:,.0f} on the thinner side)")
-            if book.imbalance is not None and book.imbalance <= risk.min_book_imbalance_strong:
-                if label == SignalLabel.STRONG_BUY:
-                    label = SignalLabel.BUY
-                risks.append(f"sellers dominate the order book (imbalance {book.imbalance:+.2f})")
-        volume_usd = (w.volume_24h_quote or 0.0) * (w.quote_usd_rate or 0.0)
-        if volume_usd < risk.min_volume_24h_usd:
-            label = SignalLabel.NO_TRADE
-            reasons.insert(0, f"24h volume ${volume_usd:,.0f} below the ${risk.min_volume_24h_usd:,.0f} minimum")
+        reasons = filter_reasons + list(cand.reasons) + evidence_reasons
+        risks: list[str] = [f"evidence: {n}" for n in board.notes] if board is not None else []
+        cap, cap_reasons, cap_risks = self._live_cap(w, cand, p, risk)
+        label, raw = label.cap(cap), raw.cap(cap)
+        for text in reversed(cap_reasons):
+            reasons.insert(0, text)
+        risks.extend(cap_risks)
         if self._notes_for is not None:
             risks.extend(self._notes_for(w.asset.symbol))
 
+        r_unit = cand.entry - cand.stop
         loss_pct = cand.risk_pct + p.cost_pct
         allocation = min(risk.max_risk_per_signal_pct / loss_pct * 100.0, risk.max_allocation_pct)
         valid_until = cand.time + timedelta(seconds=prof.setup.seconds * p.fresh_candles)
@@ -628,16 +665,64 @@ class ScalpService:
         if now > valid_until + timedelta(seconds=prof.setup.seconds) and label.rank > SignalLabel.WATCH.rank:
             label = SignalLabel.WATCH
             reasons.insert(0, "signal is older than its entry window")
+        if now > valid_until + timedelta(seconds=prof.setup.seconds):
+            raw = raw.cap(SignalLabel.WATCH)
         stats = pooled if source == "pooled" else w.stats
         result.expected = self._expected(stats, risk, p)
         result.status = {SignalLabel.STRONG_BUY: "setup now", SignalLabel.BUY: "setup now"}.get(label, "setup, not taken")
+        held = raw in (SignalLabel.BUY, SignalLabel.STRONG_BUY) and label not in (SignalLabel.BUY, SignalLabel.STRONG_BUY)
+        if held:
+            result.status = "held back by a filter"
+            result.filtered_by, result.would_be = filtered_by, raw.value
         result.signal = label
         result.reasons = reasons
         result.risks = risks
         result.summary = self._summary(result)
-        if label in (SignalLabel.BUY, SignalLabel.STRONG_BUY):
+        if label in (SignalLabel.BUY, SignalLabel.STRONG_BUY) or held:
             await self._persist(result, prof)
         return result
+
+    @staticmethod
+    def _live_cap(w: _Work, cand: sc.Candidate, p: sc.ScalpParams, risk: Any) -> tuple[SignalLabel, list[str], list[str]]:
+        """The highest label the live market allows now (checks a backtest cannot contain)."""
+        cap = SignalLabel.STRONG_BUY
+        reasons: list[str] = []
+        risks: list[str] = []
+        price = w.price
+        r_unit = cand.entry - cand.stop
+        if price is None:
+            cap = SignalLabel.NO_TRADE
+            reasons.append("live price unavailable")
+        elif price <= cand.stop:
+            cap = SignalLabel.NO_TRADE
+            reasons.append(f"invalidated: price {fmt_price(price)} is at or below the stop {fmt_price(cand.stop)}")
+        elif price >= cand.tp1:
+            cap = cap.cap(SignalLabel.WATCH)
+            reasons.append(f"missed: price {fmt_price(price)} already reached TP1 {fmt_price(cand.tp1)}")
+        elif price > cand.entry + p.max_chase_r * r_unit:
+            cap = cap.cap(SignalLabel.WATCH)
+            reasons.append(f"price ran {(price - cand.entry) / r_unit:.2f}R above the signal entry: "
+                           f"wait for a retest of {fmt_price(cand.entry)} or skip")
+        book = w.book
+        if book is None or not book.valid:
+            cap = SignalLabel.NO_TRADE
+            reasons.append("order book unavailable")
+        else:
+            if book.spread_bps is not None and book.spread_bps > risk.max_spread_bps:
+                cap = SignalLabel.NO_TRADE
+                reasons.append(f"spread {book.spread_bps:.1f} bps above the {risk.max_spread_bps:g} bps limit")
+            depth = min(book.bid_depth_quote or 0.0, book.ask_depth_quote or 0.0) * (w.quote_usd_rate or 0.0)
+            if depth < risk.min_depth_usd:
+                cap = SignalLabel.NO_TRADE
+                reasons.append(f"order book too thin (${depth:,.0f} on the thinner side)")
+            if book.imbalance is not None and book.imbalance <= risk.min_book_imbalance_strong:
+                cap = cap.cap(SignalLabel.BUY)
+                risks.append(f"sellers dominate the order book (imbalance {book.imbalance:+.2f})")
+        volume_usd = (w.volume_24h_quote or 0.0) * (w.quote_usd_rate or 0.0)
+        if volume_usd < risk.min_volume_24h_usd:
+            cap = SignalLabel.NO_TRADE
+            reasons.append(f"24h volume ${volume_usd:,.0f} below the ${risk.min_volume_24h_usd:,.0f} minimum")
+        return cap, reasons, risks
 
     def _expected(self, stats: sc.BacktestStats | None, risk: Any, p: sc.ScalpParams) -> dict[str, Any] | None:
         if stats is None or stats.expectancy_r is None:
@@ -696,11 +781,13 @@ class ScalpService:
                         risk_reward=round(pl.reward_risk_tp2, 4), trend="UP", market_regime=None,
                         reasons=list(r.reasons), risks=list(r.risks),
                         invalidation=f"a {prof.setup.label} close below {fmt_price(pl.stop)}; {pl.time_exit}",
-                        summary=r.summary, status="OPEN", engine_version=SCALP_VERSION,
+                        summary=r.summary, status="FILTERED" if r.would_be else "OPEN", engine_version=SCALP_VERSION,
                         input_features=_jsonable({"setup": r.setup, "setup_time": r.setup_time,
-                                                  "evidence": r.evidence, "horizon": prof.key}),
+                                                  "evidence_source": r.evidence, "horizon": prof.key,
+                                                  "evidence": evidence_record(r.board), "ml": r.ml}),
                         quant_output=_jsonable({"backtest": {k: v for k, v in (r.backtest or {}).items() if k != "recent"},
-                                                "max_hold": prof.max_hold}),
+                                                "max_hold": prof.max_hold, "filtered_by": r.filtered_by,
+                                                "would_be": r.would_be}),
                     )
                     session.add(signal)
                     await session.flush()

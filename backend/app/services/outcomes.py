@@ -7,6 +7,10 @@ the first target, and a time limit (14 days for swing signals, the horizon's lim
 scalps). A signal that appears while an earlier signal of the same strategy on the same
 coin is still running is marked SKIPPED, so one market move is never counted twice.
 
+Setups a filter held back (the evidence board, the learned model or the statistical filter;
+status FILTERED) are followed the same way in their own lane, so the record can show whether
+holding them back was right. They never count in the strategy's own record.
+
 It uses candles the analysis already fetched (no extra provider calls) and only needs the
 database. Results are measured, forward-looking evidence: unlike a backtest, nothing here
 was known when the rules were written.
@@ -21,7 +25,7 @@ from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.analysis.engine import STRATEGY as SWING_STRATEGY
@@ -41,6 +45,7 @@ TRACK_TIMEFRAME = {
 }
 SWING_MAX_HOLD_HOURS = 14 * 24
 BUY_LABELS = ("BUY", "STRONG BUY")
+FILTERED = "FILTERED"  # held back by a filter; followed in its own lane
 STRATEGY_LABELS = {
     SWING_STRATEGY: "Swing (4H setup)",
     "scalp_15m": "Scalp 15m",
@@ -88,38 +93,41 @@ class OutcomeTracker:
                 rows = (
                     await session.execute(
                         select(Signal)
-                        .where(Signal.symbol == symbol.upper(), Signal.status == "OPEN",
-                               Signal.signal.in_(BUY_LABELS), Signal.strategy.in_(strategies))
+                        .where(Signal.symbol == symbol.upper(), Signal.strategy.in_(strategies),
+                               or_(and_(Signal.status == "OPEN", Signal.signal.in_(BUY_LABELS)), Signal.status == FILTERED))
                         .order_by(Signal.created_at, Signal.id)
                     )
                 ).scalars().all()
                 if not rows:
                     return 0
                 targets = await self._targets(session, [r.id for r in rows])
-                busy_until: dict[str, datetime] = {}
-                for strategy in {r.strategy for r in rows}:
-                    last_exit = await self._last_exit(session, symbol.upper(), strategy)
+                busy_until: dict[tuple[str, bool], datetime] = {}  # (strategy, held back) lanes
+                for lane in {(r.strategy, r.status == FILTERED) for r in rows}:
+                    last_exit = await self._last_exit(session, symbol.upper(), lane[0], filtered=lane[1])
                     if last_exit is not None:
-                        busy_until[strategy] = last_exit
-                blocked: set[str] = set()  # strategies with a still-running earlier trade
+                        busy_until[lane] = last_exit
+                blocked: set[tuple[str, bool]] = set()  # lanes with a still-running earlier trade
                 for signal in rows:
                     created = _aware(signal.created_at)
-                    if signal.strategy in blocked:
+                    held = signal.status == FILTERED
+                    lane = (signal.strategy, held)
+                    prefix = "FILTERED_" if held else ""
+                    if lane in blocked:
                         continue
-                    if signal.strategy in busy_until and created < busy_until[signal.strategy]:
-                        signal.status = "SKIPPED"
+                    if lane in busy_until and created < busy_until[lane]:
+                        signal.status = prefix + ("SKIP" if held else "SKIPPED")
                         continue
                     series = candles[TRACK_TIMEFRAME[signal.strategy]]
                     outcome = self._evaluate(signal, targets.get(signal.id, []), series, self._cost_pct(signal.strategy))
                     if outcome is None:
                         if self._unreachable(signal, series):
-                            signal.status = "EXPIRED"  # its candles are gone (e.g. the server was down)
+                            signal.status = prefix + ("EXP" if held else "EXPIRED")  # its candles are gone
                             continue
-                        blocked.add(signal.strategy)  # still running: later signals wait for it
+                        blocked.add(lane)  # still running: later signals wait for it
                         continue
                     session.add(outcome)
-                    signal.status = "WIN" if (outcome.r_multiple or 0) > 0 else "LOSS"
-                    busy_until[signal.strategy] = created + timedelta(seconds=outcome.time_to_outcome_seconds or 0)
+                    signal.status = prefix + ("WIN" if (outcome.r_multiple or 0) > 0 else "LOSS")
+                    busy_until[lane] = created + timedelta(seconds=outcome.time_to_outcome_seconds or 0)
                     finished += 1
                 await session.commit()
         except Exception:
@@ -141,12 +149,13 @@ class OutcomeTracker:
         return out
 
     @staticmethod
-    async def _last_exit(session: AsyncSession, symbol: str, strategy: str) -> datetime | None:
+    async def _last_exit(session: AsyncSession, symbol: str, strategy: str, *, filtered: bool = False) -> datetime | None:
+        lane = Signal.status.like("FILTERED%") if filtered else ~Signal.status.like("FILTERED%")
         row = (
             await session.execute(
                 select(Signal.created_at, SignalOutcome.time_to_outcome_seconds)
                 .join(SignalOutcome, SignalOutcome.signal_id == Signal.id)
-                .where(Signal.symbol == symbol, Signal.strategy == strategy)
+                .where(Signal.symbol == symbol, Signal.strategy == strategy, lane)
                 .order_by(Signal.created_at.desc())
                 .limit(1)
             )
@@ -225,8 +234,19 @@ class OutcomeTracker:
             return {**empty, "persistence": "failed"}
         by: dict[str, list[float]] = {}
         by_ai: dict[str, list[float]] = {}
+        by_grade: dict[str, list[float]] = {}
+        held: dict[str, list[float]] = {}
+        shown_closed = []
         for sig, out in closed:
+            if sig.status.startswith("FILTERED"):
+                who = (sig.quant_output or {}).get("filtered_by") if isinstance(sig.quant_output, dict) else None
+                held.setdefault(who or "filter", []).append(out.r_multiple or 0.0)
+                continue
+            shown_closed.append((sig, out))
             by.setdefault(sig.strategy, []).append(out.r_multiple or 0.0)
+            evidence = (sig.input_features or {}).get("evidence") if isinstance(sig.input_features, dict) else None
+            if isinstance(evidence, dict) and evidence.get("grade"):
+                by_grade.setdefault(str(evidence["grade"]), []).append(out.r_multiple or 0.0)
             verdict = (sig.ai_output or {}).get("verdict") if isinstance(sig.ai_output, dict) else None
             by_ai.setdefault(verdict or "not reviewed", []).append(out.r_multiple or 0.0)
         open_count: dict[str, int] = {}
@@ -260,11 +280,19 @@ class OutcomeTracker:
                 "ai_verdict": (sig.ai_output or {}).get("verdict") if isinstance(sig.ai_output, dict) else None,
                 "hit_targets": out.hit_targets, "hours": round((out.time_to_outcome_seconds or 0) / 3600, 1),
             }
-            for sig, out in closed[:25]
+            for sig, out in shown_closed[:25]
         ]
         ai_rows = [
             {"verdict": verdict, "closed": len(rs), "win_rate": 100.0 * sum(1 for r in rs if r > 0) / len(rs),
              "avg_r": statistics.fmean(rs), "total_r": math.fsum(rs)}
             for verdict, rs in sorted(by_ai.items()) if rs
         ]
-        return {"days": days, "strategies": strategies, "recent": recent, "by_ai": ai_rows, "persistence": "ok"}
+        def row(rs: list[float]) -> dict[str, Any]:
+            return {"closed": len(rs), "win_rate": 100.0 * sum(1 for r in rs if r > 0) / len(rs),
+                    "avg_r": statistics.fmean(rs), "total_r": math.fsum(rs)}
+
+        grade_order = ["strong_for", "for", "neutral", "against", "strong_against", "thin"]
+        evidence_rows = [{"grade": g, **row(by_grade[g])} for g in grade_order if by_grade.get(g)]
+        held_rows = [{"filtered_by": who, **row(rs)} for who, rs in sorted(held.items()) if rs]
+        return {"days": days, "strategies": strategies, "recent": recent, "by_ai": ai_rows, "by_evidence": evidence_rows,
+                "held_back": held_rows, "persistence": "ok"}

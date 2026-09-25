@@ -259,6 +259,71 @@ async def ml_toggle(body: ToggleIn, c: ContainerDep, _: Admin, horizon: HorizonQ
     return await ml_view(c, horizon)
 
 
+# ----------------------------------------------------------------------------- evidence board (phase 10)
+
+
+class EvidenceSettingsIn(BaseModel):
+    mode: str | None = Field(default=None, pattern=r"^(filter|advisory|off)$")
+    refresh_news: bool | None = None
+    ai_news: bool | None = None
+
+
+@router.get("/api/evidence/settings", tags=["evidence"])
+async def evidence_settings(c: ContainerDep) -> dict[str, Any]:
+    return c.evidence.settings()
+
+
+@router.put("/api/evidence/settings", tags=["evidence"])
+async def evidence_settings_update(body: EvidenceSettingsIn, c: ContainerDep, _: Admin) -> dict[str, Any]:
+    """filter: the board can hold buys back; advisory: shown only; off: not computed."""
+    return await c.evidence.update(mode=body.mode, refresh_news=body.refresh_news, ai_news=body.ai_news)
+
+
+@router.get("/api/evidence/learning", tags=["evidence"])
+async def learning_view(c: ContainerDep) -> dict[str, Any]:
+    """What the closed setups say about each factor, and the learned model's validation."""
+    return c.learning.status()
+
+
+@router.post("/api/evidence/learning/refresh", tags=["evidence"])
+async def learning_refresh(c: ContainerDep, _: Admin) -> dict[str, Any]:
+    return await c.learning.refresh(force=True)
+
+
+@router.put("/api/evidence/learning", tags=["evidence"])
+async def learning_toggle(body: ToggleIn, c: ContainerDep, _: Admin) -> dict[str, Any]:
+    """Switch the learned model off or on (it only ever acts when validated)."""
+    await c.learning.set_enabled(body.enabled)
+    return c.learning.status()
+
+
+@router.get("/api/evidence/{symbol}", tags=["evidence"])
+async def evidence_view(symbol: SymbolPath, c: ContainerDep,
+                        horizon: Annotated[str, Query(pattern=r"^(swing|15m|1h|4h)$")] = "swing") -> dict[str, Any]:
+    """The latest board computed for a coin (by a scan or by opening the coin); never fetches."""
+    board = c.evidence.last.get((symbol.upper(), horizon))
+    if board is None:
+        raise HTTPException(status_code=404, detail="no evidence board yet: run a scan or open the coin")
+    return board.as_dict()
+
+
+@router.get("/api/derivatives/market", tags=["evidence"])
+async def derivatives_market(c: ContainerDep) -> dict[str, Any]:
+    """Futures positioning across the market (funding, crowded coins) from the reachable exchanges."""
+    if not c.derivatives.enabled:
+        raise HTTPException(status_code=503, detail="futures data is switched off (DERIVATIVES_ENABLED=false)")
+    market = await c.derivatives.market()
+    return {"fetched_at": market.fetched_at, **market.summary(c.evidence.universe_symbols() or None)}
+
+
+@router.get("/api/derivatives/{symbol}", tags=["evidence"])
+async def derivatives_coin(symbol: SymbolPath, c: ContainerDep) -> dict[str, Any]:
+    """Funding, open interest, long/short ratios, taker flow and liquidations for one coin (cached)."""
+    if not c.derivatives.enabled:
+        raise HTTPException(status_code=503, detail="futures data is switched off (DERIVATIVES_ENABLED=false)")
+    return (await c.derivatives.snapshot(symbol)).as_dict()
+
+
 # ----------------------------------------------------------------------------- AI review (phase 7)
 
 
