@@ -244,6 +244,7 @@ async def add_signal(
     *,
     input_features: dict[str, Any],
     quant_output: dict[str, Any],
+    status: str | None = None,
 ) -> Signal:
     """Insert a signal and its targets (TP1-TP3 and the stop as SL)."""
     plan = result.plan
@@ -265,7 +266,7 @@ async def add_signal(
         risks=list(result.risks),
         invalidation=plan.invalidation if plan else None,
         summary=result.summary,
-        status="OPEN" if plan is not None and plan.actionable else "INFO",
+        status=status or ("OPEN" if plan is not None and plan.actionable else "INFO"),
         is_backtest=False,
         ai_confirmed=False,
         feature_version=result.feature_version,

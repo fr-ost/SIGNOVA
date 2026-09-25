@@ -194,6 +194,9 @@ def analysis_out(r: AnalysisResult, persistence_status: str, sentiment: dict[str
         market_regime=regime_out(r.market),
         persistence=persistence_status,
         sentiment=sentiment,
+        evidence=r.evidence,
+        filtered_by=r.filtered_by,
+        would_be=r.would_be,
     )
 
 
@@ -219,7 +222,20 @@ def summary_out(a: AnalysisOut) -> SignalSummaryOut:
         suggested_allocation_pct=plan.suggested_allocation_pct if plan and plan.actionable else None,
         summary=a.summary,
         reasons=a.reasons[:3],
+        evidence_score=(a.evidence or {}).get("score"),
+        evidence_grade=(a.evidence or {}).get("grade"),
     )
+
+
+def evidence_record(board: dict[str, Any] | None) -> dict[str, Any] | None:
+    """What the learner needs from a board (stored with the signal)."""
+    if not board:
+        return None
+    return {
+        "version": board.get("version"), "score": board.get("score"), "grade": board.get("grade"),
+        "features": {f["key"]: round(float(f["direction"]) * float(f["strength"]), 4) for f in board.get("factors", [])},
+        "vetoes": board.get("vetoes", []),
+    }
 
 
 class ScanStopped(Exception):
@@ -280,6 +296,8 @@ class AnalysisService:
         # the track record follows earlier signals with the candles this analysis fetched
         self.on_candles: Callable[[str, dict[Timeframe, list[Candle]]], Awaitable[Any]] | None = None
         self.before_scan: Callable[[], Awaitable[Any]] | None = None
+        # Phase 10: the evidence board (futures, order flow, news, market); set by the container
+        self.evidence: Any = None
 
     @property
     def risk_params(self) -> RiskParams:
@@ -311,6 +329,13 @@ class AnalysisService:
             result.risks.extend(f"sentiment: {note}" for note in sentiment.notes)
         if self.event_notes is not None:
             result.risks.extend(self.event_notes(result.symbol))
+        if self.evidence is not None:
+            try:
+                await self._apply_evidence(result, collection, market)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # context: the engine's result stands if the board fails
+                log.exception("evidence board failed", extra={"symbol": result.symbol})
         if result.signal in (SignalLabel.BUY, SignalLabel.STRONG_BUY):
             log.info("signal", extra={"symbol": result.symbol, "signal": result.signal.value, "score": result.score})
         persisted = await self._persist(result)
@@ -320,6 +345,35 @@ class AnalysisService:
             except Exception:  # the track record must never break an analysis
                 log.exception("track record update failed", extra={"symbol": result.symbol})
         return analysis_out(result, persisted, asdict(sentiment) if sentiment is not None else None)
+
+    async def _apply_evidence(self, r: AnalysisResult, c: AssetCollection, market: MarketRegimeResult) -> None:
+        plan = r.plan
+        h4 = r.snapshots.get(Timeframe.H4)
+        ticker = c.ticker
+        book = c.book
+        board = await self.evidence.for_coin(
+            r.symbol, horizon="swing", price=r.price, market=market,
+            h1=c.closed.get(Timeframe.H1, []), setup=c.closed.get(Timeframe.H4, []), d1=c.closed.get(Timeframe.D1, []),
+            entry=plan.entry_high if plan else None, stop=plan.stop_loss if plan else None,
+            tp1=plan.targets[0].price if plan and plan.targets else None,
+            tp2=plan.targets[1].price if plan and len(plan.targets) > 1 else None,
+            volume_24h_quote=ticker.volume_quote_24h if ticker else None, change_24h_pct=ticker.pct_change_24h if ticker else None,
+            rsi=h4.rsi14 if h4 else None,
+            atr_pct=(h4.atr14 / r.price * 100.0) if h4 and h4.atr14 and r.price else None,
+            book_imbalance=book.imbalance if book is not None and book.valid else None,
+        )
+        if board is None:
+            return
+        r.evidence = board.as_dict()
+        r.risks.extend(f"evidence: {note}" for note in board.notes)
+        before = r.signal
+        label, why, filtered_by = self.evidence.apply(before, board, "swing")
+        if label != before:
+            r.signal, r.filtered_by, r.would_be = label, filtered_by, before.value
+            r.reasons = why + r.reasons
+            if plan is not None:
+                plan.actionable = False
+            r.summary = f"{label.value} (score {r.score}/100): {why[0]}"
 
     @staticmethod
     def _inputs(c: AssetCollection, market: MarketRegimeResult) -> AnalysisInputs:
@@ -423,7 +477,8 @@ class AnalysisService:
                 stored = last != key
                 if stored:
                     await persistence.add_signal(
-                        session, r, input_features=self._input_features(r, setup), quant_output=self._quant_output(r)
+                        session, r, input_features=self._input_features(r, setup), quant_output=self._quant_output(r),
+                        status="FILTERED" if r.filtered_by and r.plan is not None else None,
                     )
                 await session.commit()
         except Exception:
@@ -451,6 +506,7 @@ class AnalysisService:
                 for tf, s in r.structures.items()
             },
             "regimes": {tf.value: {"trend": g.trend.value, "regime": g.label.value, "adx": g.adx} for tf, g in r.regimes.items()},
+            "evidence": evidence_record(r.evidence),
         }
 
     @staticmethod
@@ -464,6 +520,8 @@ class AnalysisService:
             "plan": asdict(r.plan) if r.plan else None,
             "market_regime": r.market.regime.value,
             "market_max_signal": r.market.max_signal.value,
+            "filtered_by": r.filtered_by,
+            "would_be": r.would_be,
         }
 
     async def history(self, symbol: str | None, limit: int) -> SignalHistoryOut:

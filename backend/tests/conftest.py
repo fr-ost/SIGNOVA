@@ -7,6 +7,7 @@ never generates or substitutes data.
 from __future__ import annotations
 
 import math
+import os
 import random
 from dataclasses import replace
 from datetime import datetime, timedelta
@@ -18,6 +19,10 @@ from app.core.enums import Timeframe
 from app.core.timeutil import floor_to_timeframe, utcnow
 from app.data.http import ProviderUnavailable
 from app.data.normalization.schemas import Candle, ListingEntry, OrderBook, Ticker
+
+# Tests stay offline: futures data and the pre-scan headline refresh are opt-in per test.
+os.environ.setdefault("DERIVATIVES_ENABLED", "false")
+os.environ.setdefault("EVIDENCE_REFRESH_NEWS_DEFAULT", "false")
 
 
 def make_candles(

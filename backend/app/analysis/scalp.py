@@ -8,6 +8,7 @@ Three horizons, each with a setup timeframe (where the entry is found), a trend 
 | 15m     | 5m    | 15m   | 1H     | 6 candles (30 min)  |
 | 1h      | 15m   | 1H    | 4H     | 8 candles (2 hours) |
 | 4h      | 1H    | 4H    | 1D     | 8 candles (8 hours) |
+| 1d      | 4H    | 1D    | 1D     | 12 candles (2 days) |
 
 Two setups, both long only:
 
@@ -71,6 +72,7 @@ PROFILES: dict[str, ScalpProfile] = {
     "15m": ScalpProfile("15m", "15-minute scalp", Timeframe.M5, Timeframe.M15, Timeframe.H1, 6, True, 4000),
     "1h": ScalpProfile("1h", "1-hour trade", Timeframe.M15, Timeframe.H1, Timeframe.H4, 8, True, 4000),
     "4h": ScalpProfile("4h", "4-hour trade", Timeframe.H1, Timeframe.H4, Timeframe.D1, 8, False, 4000),
+    "1d": ScalpProfile("1d", "1-day trade", Timeframe.H4, Timeframe.D1, Timeframe.D1, 12, False, 3000),
 }
 
 
@@ -110,6 +112,8 @@ class ScalpParams:
     min_adx: float = 0.0  # setup-timeframe ADX floor (0 = off)
     pullback_volume_confirm: bool = False  # trigger candle volume at least its 20-candle average
     hold_mult: float = 1.0  # time limit multiplier
+    min_taker_ratio: float = 0.0  # share of the last 3 candles' volume bought at market (0 = off)
+    min_relative_strength: float | None = None  # trend-timeframe return minus Bitcoin's, percent (None = off)
 
     @property
     def cost_pct(self) -> float:
@@ -185,6 +189,18 @@ class ScalpSeries:
     trend_dist: list[float | None]  # trend timeframe (close - EMA50) / ATR
     trend_roc: list[float | None]  # trend timeframe 10-candle rate of change, percent
     btc_roc: list[float | None]  # Bitcoin's trend-timeframe 10-candle rate of change
+    taker_ratio: list[float | None] = field(default_factory=list)  # 3-candle taker buy share (None: no data)
+    cvd_norm: list[float | None] = field(default_factory=list)  # 20-candle net taker buying / volume
+    # strategy library inputs (app.analysis.strategies)
+    ema9: ind.Series = field(default_factory=list)
+    ema21: ind.Series = field(default_factory=list)
+    ema200: ind.Series = field(default_factory=list)
+    sma5: ind.Series = field(default_factory=list)
+    rsi2: ind.Series = field(default_factory=list)
+    bb_lower: list[float | None] = field(default_factory=list)
+    bb_mid: list[float | None] = field(default_factory=list)
+    hh55: list[float | None] = field(default_factory=list)  # highest high of the 55 candles before i
+    pivot_lows: list[tuple[int, float]] = field(default_factory=list)  # (confirmation index, price)
 
     def __len__(self) -> int:
         return len(self.candles)
@@ -233,10 +249,35 @@ def build_series(
             vol_avg[k] = window / 20.0
             window -= volumes[k - 20]
         window += v
+    taker = [c.taker_buy_base for c in setup]
+    taker_ratio: list[float | None] = [None] * len(setup)
+    cvd: list[float | None] = [None] * len(setup)
+    for k in range(len(setup)):
+        window3 = [(tb, v) for tb, v in zip(taker[max(0, k - 2) : k + 1], volumes[max(0, k - 2) : k + 1], strict=True)
+                   if tb is not None and v > 0]
+        if len(window3) == min(3, k + 1):
+            vol3 = sum(v for _, v in window3)
+            taker_ratio[k] = sum(tb for tb, _ in window3) / vol3 if vol3 > 0 else None
+        if k >= 19:
+            window20 = [(tb, v) for tb, v in zip(taker[k - 19 : k + 1], volumes[k - 19 : k + 1], strict=True)
+                        if tb is not None and v > 0]
+            if len(window20) == 20:
+                vol20 = sum(v for _, v in window20)
+                cvd[k] = sum(2 * tb - v for tb, v in window20) / vol20 if vol20 > 0 else None
     right = 3
-    pivots = sorted(
-        ((p.index + right, p.price) for p in find_pivots(setup, 5, right) if p.kind == "high"), key=lambda x: x[0]
-    )
+    found = find_pivots(setup, 5, right)
+    pivots = sorted(((p.index + right, p.price) for p in found if p.kind == "high"), key=lambda x: x[0])
+    lows_pivots = sorted(((p.index + right, p.price) for p in found if p.kind == "low"), key=lambda x: x[0])
+    hh55: list[float | None] = [None] * len(setup)
+    window_max: list[int] = []  # monotonic deque of indices (highest highs), last 55 candles before i
+    for k in range(len(setup)):
+        while window_max and window_max[0] < k - 55:
+            window_max.pop(0)
+        if k >= 55:
+            hh55[k] = highs[window_max[0]]
+        while window_max and highs[window_max[-1]] <= highs[k]:
+            window_max.pop()
+        window_max.append(k)
     return ScalpSeries(
         profile=profile,
         candles=list(setup),
@@ -263,6 +304,17 @@ def build_series(
         trend_dist=[t_dist[j] if j is not None else None for j in t_idx],
         trend_roc=[t_roc[j] if j is not None else None for j in t_idx],
         btc_roc=btc_roc,
+        taker_ratio=taker_ratio,
+        cvd_norm=cvd,
+        ema9=ind.ema(closes, 9),
+        ema21=ind.ema(closes, 21),
+        ema200=ind.ema(closes, 200),
+        sma5=ind.sma(closes, 5),
+        rsi2=ind.rsi(closes, 2),
+        bb_lower=list(bands.lower),
+        bb_mid=list(bands.middle),
+        hh55=hh55,
+        pivot_lows=lows_pivots,
     )
 
 
@@ -343,6 +395,13 @@ def evaluate_at(
 
     if p.min_adx > 0 and (s.adx[i] is None or s.adx[i] < p.min_adx):  # type: ignore[operator]
         return no(f"{prof.setup.label} ADX {s.adx[i] or 0:.0f} below {p.min_adx:g}: trend too weak")
+    if p.min_taker_ratio > 0 and s.taker_ratio and s.taker_ratio[i] is not None and s.taker_ratio[i] < p.min_taker_ratio:
+        return no(f"sellers in control: {s.taker_ratio[i] * 100:.0f}% of the last 3 candles' volume bought at market "
+                  f"(needs {p.min_taker_ratio * 100:.0f}%)")
+    if p.min_relative_strength is not None and not is_btc and s.trend_roc[i] is not None and s.btc_roc[i] is not None:
+        rs = s.trend_roc[i] - s.btc_roc[i]  # type: ignore[operator]
+        if rs < p.min_relative_strength:
+            return no(f"weaker than Bitcoin on {prof.trend.label} ({rs:+.1f}% over 10 candles)")
     kind = None
     reasons: list[str] = []
     lo3 = min(s.low[i - 3 : i + 1])
@@ -484,7 +543,7 @@ def pending_plan(s: ScalpSeries, i: int, p: ScalpParams, *, is_btc: bool = False
 FEATURES = (
     "rsi", "rsi_change", "adx", "atr_pct", "dist_ema20_atr", "ema20_slope", "volume_ratio", "bb_width_rank",
     "body_position", "trend_rsi", "trend_dist_atr", "btc_roc", "relative_strength", "hour_sin", "hour_cos",
-    "is_breakout", "risk_cost_ratio",
+    "is_breakout", "risk_cost_ratio", "taker_ratio", "cvd_norm",
 )
 
 
@@ -518,6 +577,8 @@ def features_at(s: ScalpSeries, i: int, kind: str, risk_pct: float, cost_pct: fl
         "hour_cos": math.cos(2 * math.pi * hour / 24.0),
         "is_breakout": 1.0 if kind == BREAKOUT else 0.0,
         "risk_cost_ratio": risk_pct / cost_pct if cost_pct > 0 else 10.0,
+        "taker_ratio": s.taker_ratio[i] if s.taker_ratio and s.taker_ratio[i] is not None else 0.5,
+        "cvd_norm": s.cvd_norm[i] if s.cvd_norm and s.cvd_norm[i] is not None else 0.0,
     }
 
 

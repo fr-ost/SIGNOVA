@@ -4,7 +4,7 @@ For one horizon and the selected coins, every combination of an entry filter and
 is backtested with the scalp engine. Each coin's history is split in time: the older part
 (70%) chooses the variant, the newer part (30%) - never used for choosing - tests it. The best
 training variant is recommended only if it also made money on the newer data and did at least
-as well there as the published rules. The grid is deliberately small (6 x 6): the more variants
+as well there as the published rules. The grid is deliberately small (8 x 6): the more variants
 one tries, the more likely the best-looking one is luck.
 
 The chosen variant's trades also train the statistical filter (app.analysis.ml), with the same
@@ -38,6 +38,8 @@ FILTERS: tuple[Variant, ...] = (
     Variant("cost", "stop at least 3.5x costs away", {"min_risk_cost_multiple": 3.5}),
     Variant("pull", "pullbacks only", {"setups": ("pullback",)}),
     Variant("brk", "breakouts only", {"setups": ("breakout",)}),
+    Variant("flow", "buyers in control at the trigger (taker buying 52%+)", {"min_taker_ratio": 0.52}),
+    Variant("rs", "coin stronger than Bitcoin", {"min_relative_strength": 0.0}),
 )
 EXITS: tuple[Variant, ...] = (
     Variant("x1", "half at 1R, rest at 2R, break-even", {}),

@@ -43,6 +43,10 @@ class MarketContextService:
         self._ttl = cache_seconds
         self._cache = AsyncTTLCache()
 
+    def cached(self) -> MarketContext | None:
+        entry = self._cache.peek("context")
+        return entry[0] if entry else None
+
     async def get(self, *, force: bool = False) -> MarketContext:
         return await self._cache.get_or_load("context", self._load, self._ttl, force=force)
 

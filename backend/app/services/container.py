@@ -52,6 +52,10 @@ from app.services.onchain import OnChainService
 from app.services.events import EventsService
 from app.services.killswitch import KillSwitch
 from app.services.ai_review import AIReviewService
+from app.services.ai_news import AINewsReader
+from app.services.derivatives import DerivativesService
+from app.services.evidence import EvidenceService
+from app.services.learning import LearningService
 from app.services.lab import LabService
 from app.services.settings_store import SettingsStore
 from app.analysis.engine import STRATEGY
@@ -115,6 +119,9 @@ class Container:
     lab: LabService
     store: SettingsStore
     ai_review: AIReviewService
+    derivatives: DerivativesService
+    evidence: EvidenceService
+    learning: LearningService
     stream: BinanceStreamManager | None = None
     live_prices: LivePriceBook = field(default_factory=LivePriceBook)
     cmc: CoinMarketCapClient | None = None
@@ -128,6 +135,8 @@ class Container:
         await self.scalp.load()
         await self.lab.load()
         await self.ai_review.load()
+        await self.evidence.load()
+        await self.learning.load()
         await self.portfolio.load()
         self.controller.start_background()
         if self.cmc is not None and self.cmc.has_key and not self.kill.active:
@@ -381,7 +390,9 @@ def build_container(
     events = EventsService(settings, http, health, event_coins)
 
     async def before_scan() -> None:
-        jobs = [sentiment.digest(force=True)]
+        last = universe.last
+        chosen = [a.symbol for a in selection.filter(last.assets)] if last is not None else []
+        jobs = [sentiment.digest(force=True), evidence.prepare(chosen)]
         if settings.mobula_key:
             jobs.append(events.unlocks())  # cached for EVENTS_CACHE_SECONDS; no refetch per scan
         for result in await asyncio.gather(*jobs, return_exceptions=True):
@@ -420,6 +431,18 @@ def build_container(
     )
     ai_review = AIReviewService(chat, store, session_factory, blocked=lambda: state.emergency_stop)
     wire_ai_review(ai_review, controller, analysis, scalp)
+    derivatives = DerivativesService(settings, http, health)
+    learning = LearningService(session_factory, store)
+    evidence = EvidenceService(
+        settings, derivatives, store, news=news,
+        ai_news=AINewsReader(settings, chat, store, blocked=lambda: state.emergency_stop),
+        onchain=onchain, events=events, context=context, assets=assets, session_factory=session_factory,
+        blocked=lambda: state.emergency_stop, universe_symbols=sentiment_symbols,
+    )
+    evidence.learner = learning
+    analysis.evidence = evidence
+    scalp.evidence = evidence
+    scalp.market_regime = regime.current
     return Container(
         settings=settings,
         http=http,
@@ -450,6 +473,9 @@ def build_container(
         lab=lab,
         store=store,
         ai_review=ai_review,
+        derivatives=derivatives,
+        evidence=evidence,
+        learning=learning,
         stream=stream,
         live_prices=live_prices,
         cmc=cmc_client,

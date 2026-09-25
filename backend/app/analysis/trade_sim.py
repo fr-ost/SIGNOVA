@@ -10,11 +10,16 @@ simulation is deliberately pessimistic:
   candle, so a candle cannot both pay a target and stop out the rest at break-even;
 * a trade still open after `max_hold` candles is closed at that candle's close (time exit);
 * a trade that runs out of candles before any of this is reported as OPEN.
+
+Managed exits (the strategy library): a trailing stop is computed from a closed candle and
+applies from the next one, and only ever rises; an exit signal (for example "close above the
+5-period average") closes the rest at that candle's close. Both use closed candles only.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import math
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -24,6 +29,8 @@ STOP = "STOP"  # full loss at the stop
 BREAKEVEN = "BREAKEVEN"  # first target paid, rest closed at the entry
 TARGETS = "TARGETS"  # every target reached
 TIME = "TIME"  # closed at the time limit
+TRAIL = "TRAIL"  # the trailing stop closed the (rest of the) position
+EXIT = "EXIT"  # the strategy's exit signal closed the (rest of the) position
 OPEN = "OPEN"  # not finished within the available candles
 
 
@@ -61,11 +68,14 @@ def simulate_long(
     cost_pct: float,
     max_hold: int | None = None,
     breakeven_after_first: bool = True,
+    trail: Callable[[int], float | None] | None = None,
+    exit_signal: Callable[[int], bool] | None = None,
 ) -> SimResult:
     """Simulate a long entered at `entry` before candle `start` (candles[start] is the first
-    candle after the entry)."""
-    if not (0 < stop < entry) or not targets:
-        raise ValueError("a long needs 0 < stop < entry and at least one target")
+    candle after the entry). `trail(k)` gives a stop level from closed candle k (applied from
+    k + 1, never lowered); `exit_signal(k)` closes the rest at candle k's close."""
+    if not (0 < stop < entry) or (not targets and trail is None and exit_signal is None):
+        raise ValueError("a long needs 0 < stop < entry and a target, a trailing stop or an exit signal")
     risk_pct = (entry - stop) / entry * 100.0
     remaining = 1.0
     realized = 0.0  # sum of share * price change, as a fraction
@@ -78,6 +88,7 @@ def simulate_long(
     exit_index: int | None = None
     exit_price: float | None = None
     outcome = OPEN
+    trailed = False
 
     k = start
     while k < len(candles):
@@ -90,10 +101,14 @@ def simulate_long(
         mfe = max(mfe, (c.high / entry - 1.0) * 100.0)
         mae = min(mae, (c.low / entry - 1.0) * 100.0)
         if c.low <= current_stop:
-            realized += remaining * (current_stop / entry - 1.0)
+            fill = min(current_stop, c.open)  # a gap below the stop fills at the open
+            realized += remaining * (fill / entry - 1.0)
             remaining = 0.0
-            exit_index, exit_price = k, current_stop
-            outcome = STOP if not hit else (TARGETS if next_target >= len(targets) else BREAKEVEN)
+            exit_index, exit_price = k, fill
+            if trailed and current_stop > stop:
+                outcome = TRAIL
+            else:
+                outcome = STOP if not hit else (TARGETS if next_target >= len(targets) else BREAKEVEN)
             break
         while next_target < len(targets) and c.high >= targets[next_target].price:
             t = targets[next_target]
@@ -104,13 +119,25 @@ def simulate_long(
             hit.append(next_target)
             if next_target == 1 and breakeven_after_first:
                 pending_stop = max(current_stop, entry)
-        if remaining <= 1e-9 or next_target >= len(targets):
+        managed = trail is not None or exit_signal is not None
+        if targets and (remaining <= 1e-9 or (next_target >= len(targets) and not managed)):
             if remaining > 1e-9:  # shares did not sum to 1: close the rest at the last target
                 realized += remaining * (targets[-1].price / entry - 1.0)
                 remaining = 0.0
             exit_index, exit_price = k, targets[next_target - 1].price
             outcome = TARGETS
             break
+        if exit_signal is not None and exit_signal(k):
+            realized += remaining * (c.close / entry - 1.0)
+            remaining = 0.0
+            exit_index, exit_price = k, c.close
+            outcome = EXIT
+            break
+        if trail is not None:
+            level = trail(k)
+            if level is not None and math.isfinite(level) and level > max(current_stop, pending_stop or 0.0) and level < c.close:
+                pending_stop = level
+                trailed = True
         k += 1
 
     if outcome == OPEN and max_hold is not None and held >= max_hold and held > 0:

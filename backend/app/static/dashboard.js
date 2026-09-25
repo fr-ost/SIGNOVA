@@ -490,7 +490,7 @@
           h("span", { class: "muted small" }, row.name, row.watchlist ? h("span", { class: "watch-tag", text: "watchlist" }) : null),
         ),
       ),
-      h("td", {}, signalBadge(row.signal), aiChip(row.ai_review)),
+      h("td", {}, signalBadge(row.signal), aiChip(row.ai_review), evidenceChip(row.evidence_score, row.evidence_grade)),
       h("td", {}, h("div", { class: "score-cell" }, h("span", { class: "num", text: row.score }), meter(row.score))),
       h("td", { class: "hide-sm", text: humanize(row.trend) }),
       h("td", { class: planCls, title: actionable ? null : "WATCH plan: not a buy signal" },
@@ -735,6 +735,7 @@
           h("span", { class: "muted small", text: `Trend ${humanize(a.trend).toLowerCase()} · ${a.setup_timeframe} setup · ${humanize(a.market_regime.regime).toLowerCase()} market` }),
         ),
         h("p", { class: "signal-summary", text: a.summary }),
+        heldBackNote(a.filtered_by, a.would_be),
         swingReview(a),
       ),
     );
@@ -749,6 +750,11 @@
         a.risks.length ? h("div", { class: "card-foot" }, h("strong", { class: "small", text: "Risks to keep in mind" }), plainList(a.risks, "small")) : null,
       ),
     );
+    const ev = a.evidence;
+    parts.push(card("Evidence board",
+      ev ? `${signedNum(ev.score)} · ${ev.vetoes.length ? "veto" : GRADE_TEXT[ev.grade] || ev.grade} · futures, order flow, news, market` : "not computed",
+      evidenceBlock(ev, { entry: a.plan ? a.plan.entry_high : null, stop: a.plan ? a.plan.stop_loss : null,
+        tp2: a.plan && a.plan.targets[1] ? a.plan.targets[1].price : null })));
     parts.push(card("Score breakdown", `${a.score}/100 · ${humanize(a.score_label)} before risk and data checks`, factorList(a.factors)));
     parts.push(
       card(
@@ -1048,7 +1054,7 @@
       timer = null;
       if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
     }
-    for (const id of ["analyze", "live", "auto-analyze", "scalp-scan", "refresh", "news-refresh", "mood-refresh", "events-refresh", "lab-run"]) {
+    for (const id of ["analyze", "live", "auto-analyze", "scalp-scan", "refresh", "news-refresh", "mood-refresh", "events-refresh", "lab-run", "ev-market"]) {
       const el = $(id);
       if (el) el.disabled = on || (id === "analyze" && controlState && controlState.scan.running);
     }
@@ -1418,10 +1424,19 @@
         h("p", { class: "muted small", text: "Levels move with every candle. Re-run Find scalps after the trigger candle closes; the backtest decides whether it becomes a buy." }),
       ));
     }
+    if (sig.strategy) {
+      const stg = sig.strategy;
+      parts.push(h("div", { class: "pad strategy-box" },
+        h("strong", { class: "small", text: `Strategy: ${stg.name}` }),
+        h("p", { class: "small", text: stg.rule }),
+        h("p", { class: "muted small", text: `Source: ${stg.source}` }),
+        sig.also && sig.also.length ? h("p", { class: "muted small", text: `Also fired now: ${sig.also.join(" · ")}` }) : null));
+    }
     if (sig.plan) {
       const p = sig.plan;
       parts.push(h("dl", { class: "detail-grid compact" },
         kv("Buy zone", `${fmtPrice(p.entry_low)} to ${fmtPrice(p.entry_high)}`),
+        kv("Take profit", p.exit_rule || `TP1 ${fmtPrice(p.tp1)}, TP2 ${fmtPrice(p.tp2)}`),
         kv("Stop", `${fmtPrice(p.stop)} (−${p.risk_pct.toFixed(2)}%)`),
         kv("Net R:R", `${p.reward_risk_tp1.toFixed(2)} at TP1 · ${p.reward_risk_tp2.toFixed(2)} at TP2`),
         kv("Size", `${p.suggested_allocation_pct.toFixed(1)}% of portfolio (risks ${p.risk_at_allocation_pct.toFixed(2)}%)`),
@@ -1440,8 +1455,14 @@
     } else if (sig.expected) {
       parts.push(h("p", { class: "small pad muted", text: "Enter your cash in Portfolio to see the measured average in dollars per trade." }));
     }
+    if (sig.would_be) parts.unshift(heldBackNote(sig.filtered_by, sig.would_be));
     parts.push(h("div", { class: "pad" }, h("strong", { class: "small", text: "Why" }), plainList(sig.reasons, "small")));
     if (sig.risks.length) parts.push(h("div", { class: "pad" }, h("strong", { class: "small", text: "Risks" }), plainList(sig.risks, "small")));
+    if (sig.board) {
+      const lv = sig.plan ? { entry: sig.plan.entry, stop: sig.plan.stop, tp2: sig.plan.tp2 }
+        : sig.pending ? { entry: sig.pending.trigger, stop: sig.pending.stop, tp2: sig.pending.tp2 } : {};
+      parts.push(h("div", { class: "ev-inline" }, h("div", { class: "pad-tight" }, h("strong", { class: "small", text: "Evidence board" })), evidenceBlock(sig.board, lv)));
+    }
     if (bt && bt.trades) {
       const outcomes = Object.entries(bt.outcomes).map(([k, v]) => `${humanize(k)} ${v}`).join(" · ");
       const setups = Object.entries(bt.by_setup).filter(([, v]) => v.trades).map(([k, v]) => `${k}: ${v.trades} trades, ${fmtR(v.expectancy_r)}`).join(" · ");
@@ -1484,8 +1505,11 @@
       "tr",
       { class: `clickable${open ? " open" : ""}${w ? " waiting" : ""}`, onclick: toggle, "aria-expanded": open ? "true" : "false" },
       h("td", {}, h("div", { class: "asset-cell" }, h("strong", { text: sig.symbol }), h("span", { class: "muted small", text: sig.name }))),
-      h("td", {}, signalBadge(sig.signal, null), sig.status ? h("div", { class: "muted small status-line", text: sig.status }) : null, aiChip(sig.ai_review)),
-      h("td", { class: "hide-sm", text: sig.setup ? humanize(sig.setup) : DASH }),
+      h("td", {}, signalBadge(sig.signal, null), sig.status ? h("div", { class: "muted small status-line", text: sig.status }) : null, aiChip(sig.ai_review),
+        sig.board ? evidenceChip(sig.board.score, sig.board.grade, sig.board.vetoes && sig.board.vetoes.length) : null),
+      h("td", { class: "hide-sm", title: sig.strategy ? sig.strategy.source : null },
+        sig.strategy ? sig.strategy.name : sig.setup ? humanize(sig.setup) : DASH,
+        sig.also && sig.also.length ? h("div", { class: "muted small", text: `+${sig.also.length} more` }) : null),
       h("td", { class: planCls }, ...entryCell),
       h("td", { class: planCls }, ...(p ? level(p.stop, `−${p.risk_pct.toFixed(2)}%`) : w ? level(w.stop, `−${w.risk_pct.toFixed(2)}%`) : [DASH])),
       h("td", { class: planCls }, ...(p ? level(p.tp1, fmtPrice(p.tp2)) : w ? level(w.tp1, fmtPrice(w.tp2)) : [DASH])),
@@ -1501,6 +1525,37 @@
 
   let lastScalp = null;
 
+  function renderResearch(res) {
+    const why = $("scalp-why");
+    if (res && res.no_buy_reason) {
+      why.replaceChildren(h("strong", { text: "Why no buy: " }), res.no_buy_reason);
+      why.hidden = false;
+    } else {
+      why.hidden = true;
+    }
+    const box = $("scalp-research");
+    const rows = (res && res.research) || [];
+    if (!rows.length) { box.hidden = true; return; }
+    const valid = rows.filter((r) => r.validated).length;
+    $("scalp-research-meta").textContent = ` · ${valid} of ${rows.length} validated on these coins`;
+    const cell = (sp) => (sp && sp.trades ? [fmtR(sp.expectancy_r), h("div", { class: "muted small", text: `${sp.trades} tr · ${Math.round(sp.win_rate ?? 0)}%` })] : [DASH]);
+    const sorted = rows.slice().sort((a, b) => (b.validated - a.validated) || ((b.all.expectancy_r ?? -9) - (a.all.expectancy_r ?? -9)));
+    $("scalp-research-body").replaceChildren(
+      table([["Strategy"], ["Older 70%", "num"], ["Newer 30%", "num"], ["All", "num hide-sm"], ["Exit", "hide-sm"], ["Verdict"]],
+        sorted.map((r) => h("tr", { class: r.validated ? "chosen" : null },
+          h("td", { title: r.source }, h("strong", { class: "small", text: r.name }), h("div", { class: "muted small rule-text", text: r.rule })),
+          h("td", { class: `num ${r.train.expectancy_r > 0 ? "pnl-up" : r.train.expectancy_r < 0 ? "pnl-down" : ""}` }, ...cell(r.train)),
+          h("td", { class: `num ${r.test.expectancy_r > 0 ? "pnl-up" : r.test.expectancy_r < 0 ? "pnl-down" : ""}` }, ...cell(r.test)),
+          h("td", { class: "num hide-sm" }, ...cell(r.all)),
+          h("td", { class: "hide-sm small", text: r.exit }),
+          h("td", {}, toneBadge(r.validated ? "good" : "neutral", r.validated ? "Validated" : "Not validated"),
+            h("div", { class: "muted small", text: r.reasons[0] || "" }))))),
+      h("p", { class: "muted small", text: "Results are per trade in R (1R = the amount risked), after fees and slippage, pooled over "
+        + "the scanned coins. A strategy may give a BUY only when both the older and the newer part of the history made money "
+        + "and the result is unlikely to be luck." }));
+    box.hidden = false;
+  }
+
   function renderScalp(res) {
     lastScalp = res;
     const rows = $("scalp-rows");
@@ -1508,6 +1563,7 @@
       rows.replaceChildren(h("tr", {}, h("td", { colspan: 8, class: "empty", text: "No scan yet for this horizon. Press “Find scalps”." })));
       $("scalp-meta").textContent = "";
       $("scalp-pooled").hidden = true;
+      renderResearch(null);
       return;
     }
     const c = res.counts;
@@ -1522,6 +1578,7 @@
     } else {
       $("scalp-pooled").hidden = true;
     }
+    renderResearch(res);
     const err = $("scalp-error");
     if (res.errors.length) setMessage(err, "Some coins could not be analysed", res.errors.slice(0, 5)); else err.hidden = true;
     rows.replaceChildren(...(res.signals.length ? res.signals.flatMap(scalpRows)
@@ -1589,13 +1646,13 @@
     const body = $("record-body");
     try {
       const d = await getJSON("/api/performance?days=90");
-      if (!d.strategies.length) {
+      if (!d.strategies.length && !(d.held_back && d.held_back.length)) {
         body.replaceChildren(h("p", { class: "muted small pad", text: d.persistence === "ok"
           ? "No buy signals tracked yet. Every BUY from now on (swing and scalp) is followed here until it hits its stop, targets or time limit."
           : "The track record needs the database." }));
         return;
       }
-      body.replaceChildren(
+      body.replaceChildren(...[
         table(
           [["Strategy"], ["Closed", "num"], ["Win rate", "num"], ["Avg", "num"], ["Total", "num hide-sm"], ["PF", "num hide-sm"], ["Open", "num"]],
           d.strategies.map((st) => h("tr", {},
@@ -1614,6 +1671,19 @@
             d.by_ai.map((r) => h("tr", {}, h("td", { text: humanize(r.verdict) }), h("td", { class: "num", text: r.closed }),
               h("td", { class: "num", text: `${Math.round(r.win_rate)}%` }),
               h("td", { class: `num ${r.avg_r > 0 ? "pnl-up" : r.avg_r < 0 ? "pnl-down" : ""}`, text: fmtR(r.avg_r) }))))) : null,
+        d.by_evidence && d.by_evidence.length ? h("div", { class: "pad" },
+          h("strong", { class: "small", text: "By evidence board (does it help?)" }),
+          table([["Board"], ["Closed", "num"], ["Win rate", "num"], ["Avg", "num"]],
+            d.by_evidence.map((r) => h("tr", {}, h("td", { text: GRADE_TEXT[r.grade] || r.grade }), h("td", { class: "num", text: r.closed }),
+              h("td", { class: "num", text: `${Math.round(r.win_rate)}%` }),
+              h("td", { class: `num ${r.avg_r > 0 ? "pnl-up" : r.avg_r < 0 ? "pnl-down" : ""}`, text: fmtR(r.avg_r) }))))) : null,
+        d.held_back && d.held_back.length ? h("div", { class: "pad" },
+          h("strong", { class: "small", text: "Held back by filters: what those setups did (not in the record above)" }),
+          table([["Held back by"], ["Closed", "num"], ["Win rate", "num"], ["Avg", "num"]],
+            d.held_back.map((r) => h("tr", {}, h("td", { text: humanize(FILTER_TEXT[r.filtered_by] || r.filtered_by) }), h("td", { class: "num", text: r.closed }),
+              h("td", { class: "num", text: `${Math.round(r.win_rate)}%` }),
+              h("td", { class: `num ${r.avg_r > 0 ? "pnl-up" : r.avg_r < 0 ? "pnl-down" : ""}`, text: fmtR(r.avg_r) })))),
+          h("p", { class: "muted small", text: "A filter helps when what it held back did worse than what was shown." })) : null,
         d.recent.length ? h("div", { class: "pad recent-trades" },
           h("span", { class: "small muted", text: "Latest: " }),
           ...d.recent.slice(0, 12).map((t) => h("span", {
@@ -1622,7 +1692,7 @@
             text: `${t.symbol} ${fmtR(t.r_multiple)}`,
           })),
         ) : h("p", { class: "muted small pad", text: "No finished trades yet." }),
-      );
+      ].filter(Boolean));
     } catch (err) {
       body.replaceChildren(h("p", { class: "muted small pad", text: `Track record unavailable: ${err.message}` }));
     }
@@ -1845,7 +1915,7 @@
   }
 
   function horizonLabel(k) {
-    return { "15m": "15-minute scalps", "1h": "1-hour trades", "4h": "4-hour trades" }[k] || k;
+    return { "15m": "15-minute scalps", "1h": "1-hour trades", "4h": "4-hour trades", "1d": "1-day trades" }[k] || k;
   }
 
   async function refreshLab() {
@@ -1890,6 +1960,267 @@
       scheduleControl(1000);
     } catch (err) {
       window.alert(`Could not start the lab: ${err.message}`);
+    }
+  }
+
+  // ---------------------------------------------------------------- evidence board (phase 10)
+
+  const GRADE_TEXT = { strong_for: "strong support", for: "supportive", neutral: "mixed", against: "headwinds",
+    strong_against: "strong headwinds", thin: "too little data" };
+  const GRADE_TONE = { strong_for: "good", for: "good", neutral: "neutral", against: "warning", strong_against: "critical", thin: "neutral" };
+  const FILTER_TEXT = { evidence: "the evidence board", learned: "the learned evidence model", ml: "the statistical filter", filter: "a filter" };
+  let evSettings = null;
+
+  const signedNum = (v, digits = 0) => (v == null ? DASH : `${v > 0 ? "+" : v < 0 ? "−" : ""}${Math.abs(v).toFixed(digits)}`);
+  const factorName = (key) => (evSettings && evSettings.labels && evSettings.labels[key]) || humanize(key);
+
+  function evidenceChip(score, grade, vetoed) {
+    if (score == null && !vetoed) return null;
+    const text = vetoed ? "Evidence: veto" : `Evidence ${signedNum(score)}`;
+    return h("span", { class: "ev-chip", title: vetoed ? "the evidence board vetoes buying now" : `evidence board: ${GRADE_TEXT[grade] || grade}` },
+      toneBadge(vetoed ? "critical" : GRADE_TONE[grade] || "neutral", text));
+  }
+
+  function confluenceMeter(score) {
+    const W = 240, H = 14, mid = W / 2;
+    const v = Math.max(-100, Math.min(100, score ?? 0));
+    const x = mid + (v / 100) * mid;
+    return s("svg", { viewBox: `0 0 ${W} ${H}`, class: "confluence", role: "img", "aria-label": `Evidence score ${signedNum(score)} on a scale of −100 to +100` },
+      s("rect", { x: 0, y: 4, width: W, height: H - 8, rx: 3, fill: "var(--grid)" }),
+      Math.abs(x - mid) >= 1 ? s("path", { d: v >= 0 ? `M${mid},4H${x - 3}Q${x},4 ${x},7V${H - 7}Q${x},${H - 4} ${x - 3},${H - 4}H${mid}Z`
+        : `M${mid},4H${x + 3}Q${x},4 ${x},7V${H - 7}Q${x},${H - 4} ${x + 3},${H - 4}H${mid}Z`, fill: v >= 0 ? "var(--viz-pos)" : "var(--viz-neg)" }) : null,
+      s("line", { x1: mid, x2: mid, y1: 0, y2: H, stroke: "var(--muted)", "stroke-width": 1 }));
+  }
+
+  function factorRow(f) {
+    const dir = f.direction > 0 ? "for" : f.direction < 0 ? "against" : "neutral";
+    const tag = f.veto ? "veto" : dir === "neutral" ? "neutral" : `${dir} · ${Math.round(f.strength * 100)}%`;
+    return h("li", { class: `ev-factor ${dir}${f.veto ? " veto" : ""}` },
+      h("span", { class: "ev-dir", "aria-hidden": "true", text: f.direction > 0 ? "▲" : f.direction < 0 ? "▼" : "•" }),
+      h("div", { class: "ev-main" },
+        h("div", { class: "ev-line" }, h("strong", { class: "small", text: f.label }), h("span", { class: "small ev-tag", text: tag })),
+        h("div", { class: "small ev-value", text: f.value }),
+        h("div", { class: "muted small", text: f.veto ? `${f.detail}. ${f.veto}` : f.detail }),
+        h("div", { class: "muted tiny", text: f.source })));
+  }
+
+  function hbarPath(x, y, w, hgt, r = 2) {
+    const rr = Math.min(r, w / 2, hgt / 2);
+    if (w < 0.5) return `M${x},${y}v${hgt}`;
+    return `M${x},${y}H${x + w - rr}Q${x + w},${y} ${x + w},${y + rr}V${y + hgt - rr}Q${x + w},${y + hgt} ${x + w - rr},${y + hgt}H${x}Z`;
+  }
+
+  function liqChart(map, levels = {}) {
+    const all = map.bands || [];
+    const used = all.filter((b) => b.long_usd > 0 || b.short_usd > 0);
+    if (!used.length) return h("p", { class: "muted small pad", text: "Liquidation map: no estimated liquidation zones within ±12% of the price." });
+    const W = 760, rowH = 7, padT = 8, padB = 8, padL = 10, padR = 110;
+    const H = padT + padB + all.length * rowH;
+    const maxUsd = Math.max(...all.map((b) => Math.max(b.long_usd, b.short_usd)), 1);
+    const lo = all[0].low, hi = all[all.length - 1].high;
+    const y = (price) => padT + ((hi - price) / (hi - lo)) * (all.length * rowH);
+    const xw = (usd) => (usd / maxUsd) * (W - padL - padR);
+    const tip = h("div", { class: "chart-tip", text: "Hover a band for its estimated liquidations." });
+    const rows = all.map((b) => {
+      const usd = Math.max(b.long_usd, b.short_usd);
+      const isLong = b.long_usd >= b.short_usd;
+      const top = y(b.high);
+      const bar = usd > 0 ? s("path", { d: hbarPath(padL, top + 1, xw(usd), rowH - 2), fill: isLong ? "var(--viz-neg)" : "var(--viz-pos)", class: "viz-bar" }) : null;
+      const hit = s("rect", { x: padL, y: top, width: W - padL - padR, height: rowH, fill: "transparent", tabindex: usd > 0 ? 0 : null });
+      const describe = () => {
+        if (bar) bar.classList.add("hover");
+        const parts = [];
+        if (b.long_usd) parts.push(`longs ${fmtUsd(b.long_usd)} would be forced to sell`);
+        if (b.short_usd) parts.push(`shorts ${fmtUsd(b.short_usd)} would be forced to buy`);
+        tip.textContent = `${fmtPrice(b.low)} to ${fmtPrice(b.high)}: ${parts.join(" · ") || "no estimated liquidations"} (estimate)`;
+      };
+      hit.addEventListener("mousemove", describe);
+      hit.addEventListener("focus", describe);
+      const clear = () => { if (bar) bar.classList.remove("hover"); };
+      hit.addEventListener("mouseleave", clear);
+      hit.addEventListener("blur", clear);
+      return s("g", {}, bar, hit);
+    });
+    const marks = [["now", map.price, null], ["entry", levels.entry, "2 3"], ["stop", levels.stop, "5 3"], ["TP2", levels.tp2, "2 3"]]
+      .filter(([, v]) => v != null && v >= lo && v <= hi).map(([label, v, dash]) => ({ label, v, dash, yy: y(v) }))
+      .sort((a, b) => a.yy - b.yy);
+    for (let i = 1; i < marks.length; i++) marks[i].ly = Math.max(marks[i].yy, (marks[i - 1].ly ?? marks[i - 1].yy) + 12);
+    const markEls = marks.map((m) => s("g", {},
+      s("line", { x1: padL, x2: W - padR, y1: m.yy, y2: m.yy, stroke: "var(--ink-2)", "stroke-width": 1, "stroke-dasharray": m.dash }),
+      s("text", { x: W - padR + 6, y: (m.ly ?? m.yy) + 4, "font-size": 11, fill: "var(--ink-2)" }, document.createTextNode(`${m.label} ${fmtPrice(m.v)}`))));
+    const svg = s("svg", { viewBox: `0 0 ${W} ${H}`, role: "img",
+      "aria-label": `Estimated liquidation map from ${fmtPrice(lo)} to ${fmtPrice(hi)}; price ${fmtPrice(map.price)}` }, rows, markEls);
+    const sorted = used.slice().sort((a, b) => b.high - a.high);
+    return h("div", { class: "liq-chart" },
+      h("div", { class: "pad-tight" }, h("strong", { class: "small", text: `Liquidation map (estimate from the last ${map.hours} h of open interest)` })),
+      h("div", { class: "chart-legend" },
+        h("span", {}, h("i", { class: "swatch neg" }), "long liquidations: forced selling if the price falls there"),
+        h("span", {}, h("i", { class: "swatch pos" }), "short liquidations: forced buying if the price rises there")),
+      h("div", { class: "lab-chart" }, svg), tip,
+      h("details", { class: "pad small" }, h("summary", { text: "Show as a table" }),
+        table([["Price band"], ["Longs (est.)", "num"], ["Shorts (est.)", "num"]],
+          sorted.map((b) => h("tr", {}, h("td", { text: `${fmtPrice(b.low)} – ${fmtPrice(b.high)}` }),
+            h("td", { class: "num", text: b.long_usd ? fmtUsd(b.long_usd) : DASH }), h("td", { class: "num", text: b.short_usd ? fmtUsd(b.short_usd) : DASH }))))),
+      map.notes && map.notes.length ? h("p", { class: "muted small pad", text: map.notes.join("; ") }) : null);
+  }
+
+  function evidenceBlock(board, levels = {}) {
+    if (!board) return h("p", { class: "muted small pad", text: "No evidence board: it is switched off, or this result is from before the upgrade." });
+    const vetoed = board.vetoes && board.vetoes.length;
+    const parts = [h("div", { class: "ev-head" },
+      h("div", { class: "ev-score" }, h("span", { class: "score", text: signedNum(board.score) }), h("span", { class: "unit", text: " of ±100" })),
+      toneBadge(vetoed ? "critical" : GRADE_TONE[board.grade] || "neutral", vetoed ? "veto" : GRADE_TEXT[board.grade] || board.grade),
+      confluenceMeter(board.score),
+      h("span", { class: "muted small", text: `${board.factors.length} factors with data${board.missing.length ? `, ${board.missing.length} without` : ""}` }))];
+    if (vetoed) parts.push(h("div", { class: "alert inset", role: "alert" }, h("strong", { text: "Veto: " }), board.vetoes.join("; ")));
+    const groups = Object.entries(board.groups || {}).map(([key, title]) => {
+      const rows = board.factors.filter((f) => f.group === key);
+      return rows.length ? h("div", { class: "ev-group" }, h("h4", { text: title }), h("ul", { class: "ev-list" }, rows.map(factorRow))) : null;
+    }).filter(Boolean);
+    parts.push(h("div", { class: "ev-groups" }, groups));
+    if (board.notes && board.notes.length) parts.push(h("div", { class: "pad" }, h("strong", { class: "small", text: "Liquidation zones near this plan" }), plainList(board.notes, "small")));
+    if (board.liq_map) parts.push(liqChart(board.liq_map, levels));
+    if (board.missing.length) parts.push(h("p", { class: "muted small pad", text: `No data for: ${board.missing.map(factorName).join(", ")}.` }));
+    if (board.errors && board.errors.length) {
+      parts.push(h("details", { class: "pad small muted" }, h("summary", { text: `${board.errors.length} source message(s)` }), plainList(board.errors, "small")));
+    }
+    return h("div", { class: "evidence" }, parts);
+  }
+
+  function heldBackNote(filteredBy, wouldBe) {
+    if (!filteredBy && !wouldBe) return null;
+    return h("div", { class: "alert inset held", role: "note" },
+      h("strong", { text: "Held back: " }), `${FILTER_TEXT[filteredBy] || "a filter"} kept this ${wouldBe ? humanize(wouldBe) : "buy"} at WATCH. `
+        + "It is still followed in the track record, so you can see whether holding it back was right.");
+  }
+
+  function renderLearning(l) {
+    const parts = [];
+    const need = l.needed || 90;
+    parts.push(h("div", { class: "pad" },
+      h("strong", { class: "small", text: "What the outcomes say" }),
+      h("p", { class: "small", text: `${l.samples || 0} closed setups with an evidence board (${l.shown || 0} shown as buys, ${l.held_back || 0} held back). `
+        + `The learned model needs ${need} to train and validate.` }),
+      h("div", { class: "score-cell" }, meter(Math.min(l.samples || 0, need), need), h("span", { class: "small muted", text: `${Math.min(l.samples || 0, need)}/${need}` }))));
+    const sh = l.shown_stats, hb = l.held_stats;
+    if ((sh && sh.n) || (hb && hb.n)) {
+      parts.push(table([["Group"], ["Closed", "num"], ["Win rate", "num"], ["Avg", "num"]],
+        [["Shown as buys", sh], ["Held back by filters", hb]].filter(([, st]) => st && st.n).map(([label, st]) => h("tr", {},
+          h("td", { text: label }), h("td", { class: "num", text: st.n }), h("td", { class: "num", text: `${Math.round(st.win_rate)}%` }),
+          h("td", { class: `num ${st.avg_r > 0 ? "pnl-up" : st.avg_r < 0 ? "pnl-down" : ""}`, text: fmtR(st.avg_r) })))));
+    }
+    const rows = (l.factors || []).filter((f) => f.for.n + f.against.n > 0);
+    if (rows.length) {
+      parts.push(h("div", { class: "pad" }, h("strong", { class: "small", text: "Measured edge per factor: average result when it argued for the trade versus against it" })),
+        table([["Factor"], ["For", "num"], ["Against", "num"], ["Edge", "num"], ["Verdict", "hide-sm"]],
+          rows.map((f) => h("tr", {},
+            h("td", { text: f.label }),
+            h("td", { class: "num", text: f.for.n ? `${fmtR(f.for.avg_r)} (${f.for.n})` : DASH }),
+            h("td", { class: "num", text: f.against.n ? `${fmtR(f.against.avg_r)} (${f.against.n})` : DASH }),
+            h("td", { class: `num ${f.edge_r > 0 ? "pnl-up" : f.edge_r < 0 ? "pnl-down" : ""}`, text: f.edge_r == null ? DASH : fmtR(f.edge_r) }),
+            h("td", { class: "hide-sm", text: f.verdict || "needs 5+ each way" })))));
+    }
+    const m = l.model;
+    if (m) {
+      const mt = m.metrics || {};
+      parts.push(h("div", { class: "pad ml-block" },
+        h("div", { class: "mood-head" }, h("strong", { class: "small", text: "Learned evidence model" }),
+          toneBadge(m.validated ? "good" : "neutral", m.validated ? "Validated" : "Not validated"),
+          h("span", { class: "muted small", text: l.enabled ? "used when validated" : "switched off" })),
+        h("dl", { class: "detail-grid compact" },
+          kv("Test AUC", `${mt.test_auc == null ? DASH : mt.test_auc.toFixed(2)} (0.5 = no skill)`),
+          kv("Kept vs all (newer setups)", `${fmtR(mt.test_kept_expectancy_r)} vs ${fmtR(mt.test_expectancy_r)}`),
+          kv("Strongest factors", (m.top_features || []).slice(0, 4).map((f) => `${factorName(f.name)} ${f.weight > 0 ? "+" : "−"}`).join(", ") || DASH)),
+        plainList(m.reasons || [], "small")));
+    }
+    const ai = evSettings && evSettings.ai_news && evSettings.ai_news.last;
+    if (ai && ai.coins && Object.keys(ai.coins).length) {
+      const coins = Object.entries(ai.coins).sort((a, b) => Math.abs(b[1].impact) - Math.abs(a[1].impact)).slice(0, 8);
+      parts.push(h("div", { class: "pad" }, h("strong", { class: "small", text: `AI reading of ${ai.headlines} headlines (${ai.model}, ${fmtTime(ai.computed_at)})` }),
+        h("ul", { class: "plain-list small" }, coins.map(([sym, v]) => h("li", {},
+          h("strong", { text: `${sym} ${v.impact > 0 ? "+" : v.impact < 0 ? "−" : ""}${Math.abs(v.impact)}` }), v.critical ? " (critical) " : " ", v.reason)))));
+    } else if (ai && ai.error) {
+      parts.push(h("p", { class: "muted small pad", text: `AI news reading failed: ${ai.error}` }));
+    }
+    $("ev-body").replaceChildren(...parts);
+  }
+
+  async function loadEvidence() {
+    try {
+      const [st, learn] = await Promise.all([getJSON("/api/evidence/settings"), getJSON("/api/evidence/learning")]);
+      evSettings = st;
+      $("ev-mode").value = st.mode;
+      $("ev-news").checked = !!st.refresh_news;
+      const aiOk = !!(st.ai_news && st.ai_news.configured);
+      $("ev-ai").checked = !!(st.ai_news && st.ai_news.enabled) && aiOk;
+      $("ev-ai").disabled = !aiOk;
+      $("ev-ai").parentElement.title = aiOk ? "One OpenAI request per new set of headlines" : "Needs OPENAI_API_KEY on the server";
+      $("ev-learned").checked = !!learn.enabled;
+      $("evidence-meta").textContent = `mode ${st.mode} · futures data ${st.derivatives ? "on" : "off"}`;
+      renderLearning(learn);
+    } catch (err) {
+      $("ev-body").replaceChildren(h("p", { class: "muted small pad", text: `Evidence engine unavailable: ${err.message}` }));
+    }
+  }
+
+  async function saveEvidence() {
+    const body = { mode: $("ev-mode").value, refresh_news: $("ev-news").checked };
+    if (!$("ev-ai").disabled) body.ai_news = $("ev-ai").checked;
+    try {
+      evSettings = await api("/api/evidence/settings", { method: "PUT", body });
+      $("evidence-meta").textContent = `mode ${evSettings.mode} · futures data ${evSettings.derivatives ? "on" : "off"}`;
+      $("ev-status").textContent = "Saved. The next scan uses it.";
+    } catch (err) {
+      window.alert(`Could not save: ${err.message}`);
+      loadEvidence();
+    }
+  }
+
+  async function toggleLearned() {
+    try {
+      renderLearning(await api("/api/evidence/learning", { method: "PUT", body: { enabled: $("ev-learned").checked } }));
+    } catch (err) {
+      window.alert(err.message);
+      $("ev-learned").checked = !$("ev-learned").checked;
+    }
+  }
+
+  async function recomputeLearning() {
+    const button = $("ev-learn");
+    button.disabled = true;
+    try {
+      renderLearning(await api("/api/evidence/learning/refresh", { method: "POST" }));
+      $("ev-status").textContent = `Recomputed ${fmtTime(new Date().toISOString())}.`;
+    } catch (err) {
+      $("ev-status").textContent = `Could not recompute: ${err.message}`;
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  async function loadFuturesMarket() {
+    const box = $("ev-market-body");
+    const button = $("ev-market");
+    button.disabled = true;
+    box.replaceChildren(h("p", { class: "muted small pad", text: "Asking the exchanges…" }));
+    try {
+      const m = await getJSON("/api/derivatives/market");
+      if (!m.coins) {
+        box.replaceChildren(h("p", { class: "muted small pad", text: `No exchange answered. ${(m.errors || []).slice(0, 3).join("; ")}` }));
+        return;
+      }
+      box.replaceChildren(h("dl", { class: "detail-grid compact pad" },
+        kv("Average funding", `${signedNum(m.avg_funding_pct, 4)}% per 8h over ${m.coins} perpetuals (0.01% is normal)`),
+        kv("Crowded longs", m.hot.length ? m.hot.join(", ") : "none"),
+        kv("Crowded shorts", m.cold.length ? m.cold.join(", ") : "none"),
+        kv("Open interest", fmtUsd(m.open_interest_usd)),
+        kv("Exchanges answering", (m.venues || []).map(humanize).join(", ") || DASH),
+        kv("Checked", fmtTime(m.fetched_at))),
+        ...(m.errors && m.errors.length ? [h("p", { class: "muted small pad", text: `Not reachable from this server: ${m.errors.slice(0, 4).join("; ")}` })] : []));
+    } catch (err) {
+      box.replaceChildren(h("p", { class: "muted small pad", text: `Futures positioning unavailable: ${err.message}` }));
+    } finally {
+      button.disabled = emergency;
     }
   }
 
@@ -2524,17 +2855,22 @@
 
     const savedHorizon = pref("scalpHorizon");
     document.querySelectorAll(".segmented [data-horizon]").forEach((b) => b.addEventListener("click", () => setHorizon(b.dataset.horizon)));
-    setHorizon(savedHorizon === "15m" || savedHorizon === "4h" ? savedHorizon : "1h");
+    setHorizon(["15m", "4h", "1d"].includes(savedHorizon) ? savedHorizon : "1h");
     $("scalp-scan").addEventListener("click", startScalp);
     const savedLab = pref("labHorizon");
     document.querySelectorAll("[data-lab-horizon]").forEach((b) => b.addEventListener("click", () => setLabHorizon(b.dataset.labHorizon)));
-    setLabHorizon(savedLab === "15m" || savedLab === "4h" ? savedLab : "1h");
+    setLabHorizon(["15m", "4h", "1d"].includes(savedLab) ? savedLab : "1h");
     $("lab-run").addEventListener("click", startLab);
     $("ai-mode").addEventListener("change", saveAiSettings);
     $("ai-auto").addEventListener("change", saveAiSettings);
     loadAiSettings();
     $("record-refresh").addEventListener("click", refreshRecord);
     refreshRecord();
+    for (const id of ["ev-mode", "ev-news", "ev-ai"]) $(id).addEventListener("change", saveEvidence);
+    $("ev-learned").addEventListener("change", toggleLearned);
+    $("ev-learn").addEventListener("click", recomputeLearning);
+    $("ev-market").addEventListener("click", loadFuturesMarket);
+    loadEvidence();
 
     $("sel-all").addEventListener("click", () => presetSelection("all"));
     $("sel-none").addEventListener("click", () => presetSelection("none"));

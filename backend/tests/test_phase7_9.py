@@ -181,7 +181,7 @@ async def test_waiting_coins_show_conditional_levels(env):
 def test_lab_grid_and_choice_rules():
     from app.analysis import lab
 
-    assert len(lab.FILTERS) * len(lab.EXITS) == 36 and lab.BASELINE == ("base", "x1")
+    assert len(lab.FILTERS) * len(lab.EXITS) == 48 and lab.BASELINE == ("base", "x1")
     p = lab.params_for(sc.ScalpParams(), "cost", "x5")
     assert p.min_risk_cost_multiple == 3.5 and p.tp1_share == 1.0 and p.tp1_r == 1.5 and p.variant == "cost/x5"
     c = sc.Candidate("pullback", 10, datetime(2026, 1, 1, tzinfo=UTC), 100.0, 99.0, 101.0, 102.0, 1.0, 0.8, [], level=101.2)
@@ -205,7 +205,7 @@ def test_lab_splits_by_time_and_never_chooses_on_test_data():
 
     coins = _lab_coins()
     r = lab.run_lab(coins, sc.ScalpParams(), "1h", datetime.now(UTC))
-    assert len(r.combos) == 36 and r.split_time is not None and r.period_start < r.split_time < r.period_end
+    assert len(r.combos) == 48 and r.split_time is not None and r.period_start < r.split_time < r.period_end
     min_trades = max(lab.MIN_TRAIN_TRADES, int(0.25 * next(c for c in r.combos if (c.filter, c.exit) == lab.BASELINE).train.trades))
     eligible = [c for c in r.combos if c.train.trades >= min_trades]
     if eligible:  # the choice is the best TRAINING expectancy, whatever the test data says
@@ -232,14 +232,14 @@ async def test_lab_api_apply_reset_and_model_toggle(env):
     http, c, sessions, _ = env
     await http.put("/api/control/selection", json={"mode": "selected", "symbols": ["BTC", "ETH", "SOL", "ADA"]})
     view = (await http.get("/api/lab", params={"horizon": "1h"})).json()
-    assert view["result"] is None and view["applied"]["label"] == "published rules" and len(view["filters"]) == 6
+    assert view["result"] is None and view["applied"]["label"] == "published rules" and len(view["filters"]) == 8
     started = (await http.post("/api/lab/run", params={"horizon": "1h"})).json()
     assert started["started"] is True
     await c.lab.wait("1h")
     view = (await http.get("/api/lab", params={"horizon": "1h"})).json()
     assert view["status"]["outcome"] == "completed", view["status"]
     res = view["result"]
-    assert len(res["combos"]) == 36 and set(res["coins"]) == {"BTC", "ETH", "SOL", "ADA"} and res["applied"]
+    assert len(res["combos"]) == 48 and set(res["coins"]) == {"BTC", "ETH", "SOL", "ADA"} and res["applied"]
     # the scalp engine uses exactly what the lab applied
     if res["accepted"] and tuple(res["recommendation"]) != ("base", "x1"):
         assert c.scalp.params("1h").variant == "/".join(res["recommendation"])
