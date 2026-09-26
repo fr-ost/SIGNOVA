@@ -61,8 +61,8 @@ class Settings(BaseSettings):
     )
 
     # --- application ---------------------------------------------------------
-    app_name: str = "Crypto Market Analysis & Spot Signal Dashboard"
-    app_version: str = "1.2.0-phase12"
+    app_name: str = "Signova"
+    app_version: str = "2.0.0-signova"
     environment: Literal["development", "test", "production"] = "development"
     log_level: str = "INFO"
     json_logs: bool = True
@@ -242,7 +242,15 @@ class Settings(BaseSettings):
     futures_fee_pct: float = 0.05  # taker fee per side (Binance USD-M regular tier; 0.045 with the BNB discount)
     futures_slippage_pct: float = 0.02  # per side
     futures_max_leverage: int = 5  # the plan never suggests more (you can change it in the dashboard, up to 20)
-    futures_maintenance_margin_pct: float = 1.0  # conservative for altcoins (BTC/ETH tiers are lower)
+    futures_maintenance_margin_pct: float = 1.0
+
+    # --- Phase 13: Signova AI analyst (OpenAI decides; the dashboard checks and sizes the plan) ---
+    ai_analyst_model: str = "auto"  # auto = the best GPT model your key can use (newest gpt-N.M), else o3 / gpt-4.1
+    ai_analyst_effort: str = "high"  # reasoning effort: low | medium | high
+    ai_analyst_review: bool = True  # a second, independent risk-manager pass on every proposed trade
+    ai_analyst_min_conviction: int = 60  # below this the analyst's plan is shown as WATCH
+    ai_analyst_min_reward_risk: float = 1.5  # net of costs, at the final target
+    ai_analyst_concurrency: int = 2  # coins analysed at the same time  # conservative for altcoins (BTC/ETH tiers are lower)
 
     # --- token unlocks and airdrops (optional keys) -------------------------------------
     events_cache_seconds: int = 21600

@@ -56,6 +56,7 @@ from app.services.ai_news import AINewsReader
 from app.services.derivatives import DerivativesService
 from app.services.evidence import EvidenceService
 from app.services.futures import FuturesService
+from app.services.ai_analyst import AIAnalystService
 from app.services.learning import LearningService
 from app.services.lab import LabService
 from app.services.settings_store import SettingsStore
@@ -124,6 +125,7 @@ class Container:
     evidence: EvidenceService
     learning: LearningService
     futures: FuturesService
+    analyst: AIAnalystService
     stream: BinanceStreamManager | None = None
     live_prices: LivePriceBook = field(default_factory=LivePriceBook)
     cmc: CoinMarketCapClient | None = None
@@ -140,6 +142,7 @@ class Container:
         await self.evidence.load()
         await self.learning.load()
         await self.futures.load()
+        await self.analyst.load()
         await self.portfolio.load()
         self.controller.start_background()
         if self.cmc is not None and self.cmc.has_key and not self.kill.active:
@@ -157,6 +160,7 @@ class Container:
         await self.lab.stop()
         await self.scalp.stop()
         await self.futures.stop()
+        await self.analyst.stop()
         await self.controller.stop()
         self.state.processing_state = ProcessingState.EMERGENCY_STOP
 
@@ -168,6 +172,7 @@ class Container:
         await self.lab.stop()
         await self.scalp.stop()
         await self.futures.stop()
+        await self.analyst.stop()
         await self.controller.aclose()
         if self.stream is not None and self.stream.running:
             await self.stream.stop()
@@ -427,7 +432,7 @@ def build_container(
     tracker = OutcomeTracker(
         session_factory,
         cost_pct=lambda strategy: analysis.risk_params.round_trip_cost_pct if strategy == STRATEGY
-        else 2.0 * (futures.fee_pct + futures.slippage_pct) if strategy.startswith("fut_")
+        else 2.0 * (futures.fee_pct + futures.slippage_pct) if strategy.startswith(("fut_", "ai_futures_"))
         else 2.0 * (analysis.risk_params.fee_pct + settings.scalp_slippage_pct),
     )
     analysis.on_candles = tracker.update
@@ -474,6 +479,12 @@ def build_container(
         session_factory=session_factory, on_candles=tracker.update, blocked=lambda: state.emergency_stop,
     )
     wire_futures_review(ai_review, futures)
+    analyst = AIAnalystService(
+        settings, universe, assets, chat, store, regime=regime, context=context, evidence=evidence, news=news,
+        sentiment=sentiment, events=events, futures=futures, risk_params=lambda: analysis.risk_params,
+        equity=portfolio.equity_at_cost, selection_filter=selection.filter, session_factory=session_factory,
+        on_candles=tracker.update, blocked=lambda: state.emergency_stop,
+    )
     return Container(
         settings=settings,
         http=http,
@@ -508,6 +519,7 @@ def build_container(
         evidence=evidence,
         learning=learning,
         futures=futures,
+        analyst=analyst,
         stream=stream,
         live_prices=live_prices,
         cmc=cmc_client,

@@ -37,7 +37,7 @@ PROMPT_VERSION = "review-1"
 VERDICTS = ("agree", "caution", "reject")
 MAX_CONTEXT_CHARS = 14000
 
-REVIEW_PROMPT = """You are the risk reviewer of a spot-only crypto trading dashboard.
+REVIEW_PROMPT = """You are the risk reviewer of Signova, a crypto trading-signal dashboard (spot and futures).
 You get ONE trade signal produced by a deterministic engine, with its data (SIGNAL, JSON).
 Look for concrete reasons the trade could fail that the engine may have underweighted:
 weak or small-sample backtest, price extended above its averages, resistance close above,

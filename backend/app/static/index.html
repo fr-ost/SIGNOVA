@@ -3,9 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Crypto Signal Dashboard</title>
-  <meta name="description" content="Top 20 spot market signals with fail-safe data checks, risk engine and provider health.">
-  <link rel="icon" href="data:,">
+  <title>Signova · AI crypto signals</title>
+  <meta name="description" content="Signova: AI crypto trade signals for spot and futures, with fail-safe data checks, risk engine and a measured track record.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='6' fill='%234f46e5'/%3E%3Cpath d='M12 4.5l1.9 5.6 5.6 1.9-5.6 1.9L12 19.5l-1.9-5.6L4.5 12l5.6-1.9z' fill='white'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="/static/dashboard.css?v=__VERSION__">
   <script src="/static/dashboard.js?v=__VERSION__" defer></script>
 </head>
@@ -27,12 +27,14 @@
     <symbol id="i-flask" viewBox="0 0 24 24"><path d="M9 3h6M10 3v6l-5.5 9.5A2 2 0 0 0 6.2 21h11.6a2 2 0 0 0 1.7-2.5L14 9V3"/><path d="M7.5 15h9"/></symbol>
     <symbol id="i-scale" viewBox="0 0 24 24"><path d="M12 3v18M7 21h10M4 7h16"/><path d="m4 7-3 7a3 3 0 0 0 6 0zM20 7l-3 7a3 3 0 0 0 6 0z"/></symbol>
     <symbol id="i-swap" viewBox="0 0 24 24"><path d="M7 4v13M3 13l4 4 4-4M17 20V7M13 11l4-4 4 4"/></symbol>
-    <symbol id="i-logo" viewBox="0 0 24 24"><path d="M3 17 9 11l4 4 8-8"/><path d="M15 7h6v6"/></symbol>
+    <symbol id="i-logo" viewBox="0 0 24 24"><path d="M12 3.5l2.1 6.4 6.4 2.1-6.4 2.1L12 20.5l-2.1-6.4L3.5 12l6.4-2.1z"/></symbol>
+    <symbol id="i-brain" viewBox="0 0 24 24"><path d="M9 4a3 3 0 0 0-3 3 3 3 0 0 0-2 5 3 3 0 0 0 2 5 3 3 0 0 0 3 3h1V4z"/><path d="M15 4a3 3 0 0 1 3 3 3 3 0 0 1 2 5 3 3 0 0 1-2 5 3 3 0 0 1-3 3h-1V4z"/><path d="M10 9H8M16 9h-2M10 14H7.5M16.5 14H14"/></symbol>
   </svg>
   <header class="topbar">
     <div class="brand">
       <span class="logo" aria-hidden="true"><svg><use href="#i-logo"/></svg></span>
-      <h1>Crypto Market Analysis</h1>
+      <h1>Signova</h1>
+      <span class="muted small tagline">AI crypto signals</span>
       <span class="muted small">v__VERSION__</span>
     </div>
     <div class="topbar-status">
@@ -55,8 +57,8 @@
 
   <main>
     <p class="notice">
-      Manual control: nothing is analysed until you press <strong>Analyze now</strong>. Spot only, no trade
-      execution: you decide and place every trade yourself. Nothing here is financial advice.
+      Manual control: nothing is analysed until you press a button. No trade execution: you decide and
+      place every trade yourself (spot and futures). Nothing here is financial advice.
     </p>
 
     <section class="card controls" data-feature="control" aria-label="Analysis controls">
@@ -106,6 +108,72 @@
     <div class="main-col">
     <section aria-label="Market context">
       <div id="tiles" class="tiles"></div>
+    </section>
+
+    <section class="card ai-card" data-feature="analyst" aria-labelledby="analyst-title">
+      <div class="card-head">
+        <h2 id="analyst-title"><svg class="feat-icon" aria-hidden="true"><use href="#i-brain"/></svg>Signova AI analyst</h2>
+        <span id="analyst-meta" class="muted small"></span>
+      </div>
+      <p class="muted small pad">OpenAI's best model on your key reads each selected coin like a senior trader: several timeframes
+        of candles, indicators, structure and levels, futures funding, open interest, long/short ratios and liquidations, order
+        flow, news, sentiment, the market and Bitcoin, and the rule engines' measured research. It decides long, short or no
+        trade with an exact plan; a second pass as an independent risk manager can lower or reject it. Signova then checks the
+        plan is executable and worth its costs, sizes it, and tracks every AI signal in the Track record so you can see whether
+        the AI really beats the rules. Takes about a minute per coin and uses your OpenAI credits.</p>
+      <div class="control-row pad-row">
+        <div class="segmented" id="analyst-markets" role="radiogroup" aria-label="Market">
+          <button type="button" role="radio" data-amarket="futures" aria-checked="true">Futures</button>
+          <button type="button" role="radio" data-amarket="spot" aria-checked="false">Spot</button>
+        </div>
+        <div class="segmented" id="analyst-horizons" role="radiogroup" aria-label="AI horizon">
+          <button type="button" role="radio" data-ahorizon="15m" aria-checked="false">15 min</button>
+          <button type="button" role="radio" data-ahorizon="1h" aria-checked="false">1 hour</button>
+          <button type="button" role="radio" data-ahorizon="4h" aria-checked="true">4 hours</button>
+          <button type="button" role="radio" data-ahorizon="1d" aria-checked="false">1 day</button>
+        </div>
+        <button id="analyst-scan" type="button" class="primary">Analyze with AI</button>
+        <span id="analyst-status" class="muted small" aria-live="polite"></span>
+      </div>
+      <details id="analyst-settings" class="research pad">
+        <summary><strong class="small">AI settings</strong> <span id="analyst-settings-meta" class="muted small"></span></summary>
+        <div class="control-row analyst-settings">
+          <label class="small inline-select">Model <select id="analyst-model"><option value="auto">Best available (auto)</option></select></label>
+          <label class="small inline-select">Thinking
+            <select id="analyst-effort"><option value="high">High (most careful)</option><option value="medium">Medium</option><option value="low">Low (fastest)</option></select>
+          </label>
+          <label class="small inline-select">Minimum conviction
+            <select id="analyst-conv"><option>55</option><option>60</option><option>65</option><option>70</option><option>75</option><option>80</option></select>
+          </label>
+          <label class="toggle small"><input id="analyst-review" type="checkbox"> Risk-manager second opinion</label>
+          <label class="toggle small"><input id="analyst-quant" type="checkbox"> Give the AI the rule engines' research</label>
+        </div>
+      </details>
+      <div class="progress inset" aria-hidden="true"><span id="analyst-progress"></span></div>
+      <div id="analyst-error" class="alert inset" role="alert" hidden></div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Coin</th>
+              <th>AI signal</th>
+              <th class="num">Conviction</th>
+              <th class="num">Entry</th>
+              <th class="num">Stop</th>
+              <th class="num">TP1 / TP2</th>
+              <th class="num hide-sm">Size</th>
+              <th class="hide-sm">Thesis</th>
+            </tr>
+          </thead>
+          <tbody id="analyst-rows">
+            <tr><td colspan="8" class="empty">Choose a market and horizon, then press “Analyze with AI”. Select the coins first (Coins to analyse): each coin is one careful AI analysis.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="card-foot small muted">
+        An AI model can be wrong, confident and persuasive at the same time. Nothing here is guaranteed: the Track record
+        (“AI futures 4h”, “AI spot 1h”…) is the only honest measure of its accuracy. Start with small sizes.
+      </div>
     </section>
 
     <div id="state-reasons" class="alert warn" hidden></div>

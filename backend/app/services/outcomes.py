@@ -48,7 +48,11 @@ TRACK_TIMEFRAME = {
     "fut_1h": Timeframe.M15,
     "fut_4h": Timeframe.H1,
     "fut_1d": Timeframe.H4,
+    # Phase 13: Signova AI analyst signals, followed on their setup timeframe
+    **{f"ai_{market}_{h}": tf for market in ("spot", "futures")
+       for h, tf in (("15m", Timeframe.M5), ("1h", Timeframe.M15), ("4h", Timeframe.H1), ("1d", Timeframe.H4))},
 }
+NOFILL = "NOFILL"  # a limit or stop entry that never filled (or the move left without it)
 SWING_MAX_HOLD_HOURS = 14 * 24
 BUY_LABELS = ("BUY", "STRONG BUY", "LONG", "STRONG LONG", "SHORT", "STRONG SHORT")  # spot buys and futures trades
 FILTERED = "FILTERED"  # held back by a filter; followed in its own lane
@@ -62,6 +66,7 @@ STRATEGY_LABELS = {
     "fut_1h": "Futures 1h",
     "fut_4h": "Futures 4h",
     "fut_1d": "Futures 1d",
+    **{f"ai_{market}_{h}": f"AI {market} {h}" for market in ("spot", "futures") for h in ("15m", "1h", "4h", "1d")},
 }
 
 
@@ -88,10 +93,33 @@ def _mirror(c: Candle, k: float) -> Candle | None:
     return replace(c, open=k / c.open, high=k / c.low, low=k / c.high, close=k / c.close)
 
 
+def _fill(candles: Sequence[Candle], start: int, entry: float, stop: float, kind: str, wait: int,
+          tp1: float | None) -> tuple[int, float] | str | None:
+    """(first candle to simulate, fill price) for a long limit (buy at or below `entry`) or stop order (buy
+    at or above it) placed before candle `start`; NOFILL when it expired or the price reached the first
+    target without filling; None while it is still waiting. Shorts arrive mirrored, so the same rules apply."""
+    end = start + max(1, wait)
+    for k in range(start, min(end, len(candles))):
+        c = candles[k]
+        if kind == "limit" and c.low <= entry:
+            price = min(entry, c.open)
+        elif kind == "stop" and c.high >= entry:
+            price = max(entry, c.open)
+        else:
+            if tp1 is not None and c.high >= tp1:
+                return NOFILL  # the move happened without the order
+            continue
+        if price <= stop:  # gapped through the stop at the open: count it from the planned entry (pessimistic)
+            return k, entry
+        # the fill candle: a stop in it is counted (pessimistic), a target in it is not
+        return (k, price) if c.low <= stop else (k + 1, price)
+    return NOFILL if len(candles) >= end else None
+
+
 def default_cost_pct(strategy: str) -> float:
     """Round-trip costs in percent: spot fees 0.1% per side with slippage 0.05% (swing) or 0.02% (scalp);
     futures taker fees 0.05% per side with 0.02% slippage."""
-    if strategy.startswith("fut_"):
+    if strategy.startswith(("fut_", "ai_futures_")):
         return 2.0 * (0.05 + 0.02)
     return 2.0 * (0.1 + (0.05 if strategy == SWING_STRATEGY else 0.02))
 
@@ -145,6 +173,9 @@ class OutcomeTracker:
                         continue
                     series = candles[TRACK_TIMEFRAME[signal.strategy]]
                     outcome = self._evaluate(signal, targets.get(signal.id, []), series, self._cost_pct(signal.strategy))
+                    if outcome == NOFILL:
+                        signal.status = NOFILL  # the order never filled: not a trade, not in the record
+                        continue
                     if outcome is None:
                         if self._unreachable(signal, series):
                             signal.status = prefix + ("EXP" if held else "EXPIRED")  # its candles are gone
@@ -201,7 +232,7 @@ class OutcomeTracker:
     @staticmethod
     def _evaluate(
         signal: Signal, targets: list[SignalTarget], candles: Sequence[Candle], cost_pct: float
-    ) -> SignalOutcome | None:
+    ) -> SignalOutcome | str | None:
         entry, stop = signal.entry_high, signal.stop_loss
         quant = signal.quant_output if isinstance(signal.quant_output, dict) else {}
         short = quant.get("side") == "short" or "SHORT" in (signal.signal or "")
@@ -224,6 +255,12 @@ class OutcomeTracker:
             return None  # no candle after the signal yet
         if candles[0].open_time > created + timedelta(seconds=candles[0].timeframe.seconds):
             return None  # these candles start after the signal: cannot follow it from the start
+        if quant.get("entry_type") in ("limit", "stop"):  # an order at a level: it counts only once it fills
+            filled = _fill(candles, start, entry, stop, quant["entry_type"], int(quant.get("entry_wait") or 1),
+                           min((t.price for t in targets if t.price and t.price > entry), default=None))
+            if filled is None or filled == NOFILL:
+                return filled
+            start, entry = filled
         trail = exit_signal = None
         breakeven = True
         if isinstance(quant.get("exit"), dict):  # a library strategy: the same exit rules as its backtest
