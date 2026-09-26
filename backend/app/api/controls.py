@@ -53,6 +53,7 @@ def full_status(c: Container) -> dict[str, Any]:
         "chat_available": c.chat.configured,
         "watchlist": c.watchlist.symbols(),
         "emergency_stop": c.kill.status(),
+        "futures": c.futures.status(),
     }
 
 
@@ -324,11 +325,49 @@ async def derivatives_coin(symbol: SymbolPath, c: ContainerDep) -> dict[str, Any
     return (await c.derivatives.snapshot(symbol)).as_dict()
 
 
+# ----------------------------------------------------------------------------- futures signals (phase 12)
+
+
+class FuturesSettingsIn(BaseModel):
+    max_leverage: int | None = Field(default=None, ge=1, le=20)
+    fee_pct: float | None = Field(default=None, ge=0.0, le=0.2)
+    slippage_pct: float | None = Field(default=None, ge=0.0, le=0.5)
+    mmr_pct: float | None = Field(default=None, ge=0.1, le=5.0)
+
+
+@router.post("/api/futures/scan", tags=["futures"])
+async def futures_scan(c: ContainerDep, _: Admin, horizon: HorizonQuery = "1h") -> dict[str, Any]:
+    """Long and short setups on USDT perpetuals for the selected coins (in the background)."""
+    if c.kill.active:
+        raise HTTPException(status_code=503, detail="emergency stop is engaged")
+    if not c.futures.enabled:
+        raise HTTPException(status_code=503, detail="futures signals are switched off (FUTURES_ENABLED=false)")
+    started = c.futures.start_scan(horizon)
+    return {"started": started, "status": c.futures.status()}
+
+
+@router.get("/api/futures", tags=["futures"])
+async def futures_view(c: ContainerDep, horizon: HorizonQuery = "1h") -> dict[str, Any]:
+    """The latest futures scan at a horizon (never starts one)."""
+    return {"result": c.futures.results.get(horizon), "status": c.futures.status(), "settings": c.futures.settings()}
+
+
+@router.get("/api/futures/settings", tags=["futures"])
+async def futures_settings(c: ContainerDep) -> dict[str, Any]:
+    return c.futures.settings()
+
+
+@router.put("/api/futures/settings", tags=["futures"])
+async def futures_settings_update(body: FuturesSettingsIn, c: ContainerDep, _: Admin) -> dict[str, Any]:
+    """Leverage cap, fees, slippage and maintenance margin used by the futures plans."""
+    return await c.futures.update(**body.model_dump())
+
+
 # ----------------------------------------------------------------------------- AI review (phase 7)
 
 
 class ReviewIn(BaseModel):
-    kind: str = Field(pattern=r"^(swing|scalp)$")
+    kind: str = Field(pattern=r"^(swing|scalp|futures)$")
     symbol: str = Field(min_length=1, max_length=15, pattern=r"^[A-Za-z0-9]+$")
     horizon: str | None = Field(default=None, pattern=r"^(15m|1h|4h|1d)$")
     model: str | None = Field(default=None, max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
@@ -344,12 +383,13 @@ class ReviewSettingsIn(BaseModel):
 async def ai_review(body: ReviewIn, c: ContainerDep, _: Admin) -> dict[str, Any]:
     """A second opinion from the OpenAI model on one signal: agree, caution or reject (it can only lower)."""
     symbol = body.symbol.upper()
-    if body.kind == "scalp":
+    if body.kind in ("scalp", "futures"):
         horizon = body.horizon or "1h"
-        result = c.scalp.results.get(horizon)
+        result = (c.scalp if body.kind == "scalp" else c.futures).results.get(horizon)
         signal = next((s for s in (result or {}).get("signals", []) if s["symbol"] == symbol), None)
         if signal is None:
-            raise HTTPException(status_code=404, detail=f"no {horizon} scalp result for {symbol}: run Find scalps first")
+            what = "Find scalps" if body.kind == "scalp" else "Find futures trades"
+            raise HTTPException(status_code=404, detail=f"no {horizon} {body.kind} result for {symbol}: run {what} first")
     else:
         horizon = ""
         cached = c.analysis.cached(symbol) or await c.analysis.analyze(symbol)

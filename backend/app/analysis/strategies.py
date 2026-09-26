@@ -418,6 +418,15 @@ def research(key: str, per_coin: dict[str, tuple[list[sc.TradeRecord], datetime 
     return r
 
 
+def research_order(r: Research) -> tuple[bool, bool, float]:
+    """Display order: validated first, then strategies with enough trades to judge (best first), then
+    the rest (closest to enough trades first), so a handful of lucky trades never tops the table."""
+    enough = r.train.trades >= MIN_TRAIN_TRADES and r.test.trades >= MIN_TEST_TRADES
+    if not (r.validated or enough):
+        return (True, True, -float(r.all.trades))
+    return (not r.validated, not enough, -(r.all.expectancy_r if r.all.expectancy_r is not None else -9.0))
+
+
 def _exit_summary(spec: ExitSpec) -> str:
     if spec.trail == "donchian":
         return f"trailing stop at the {spec.trail_len}-candle low"

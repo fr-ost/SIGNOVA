@@ -55,6 +55,7 @@ from app.services.ai_review import AIReviewService
 from app.services.ai_news import AINewsReader
 from app.services.derivatives import DerivativesService
 from app.services.evidence import EvidenceService
+from app.services.futures import FuturesService
 from app.services.learning import LearningService
 from app.services.lab import LabService
 from app.services.settings_store import SettingsStore
@@ -122,6 +123,7 @@ class Container:
     derivatives: DerivativesService
     evidence: EvidenceService
     learning: LearningService
+    futures: FuturesService
     stream: BinanceStreamManager | None = None
     live_prices: LivePriceBook = field(default_factory=LivePriceBook)
     cmc: CoinMarketCapClient | None = None
@@ -137,6 +139,7 @@ class Container:
         await self.ai_review.load()
         await self.evidence.load()
         await self.learning.load()
+        await self.futures.load()
         await self.portfolio.load()
         self.controller.start_background()
         if self.cmc is not None and self.cmc.has_key and not self.kill.active:
@@ -153,6 +156,7 @@ class Container:
         await self.ai_review.stop()
         await self.lab.stop()
         await self.scalp.stop()
+        await self.futures.stop()
         await self.controller.stop()
         self.state.processing_state = ProcessingState.EMERGENCY_STOP
 
@@ -163,6 +167,7 @@ class Container:
         await self.ai_review.stop()
         await self.lab.stop()
         await self.scalp.stop()
+        await self.futures.stop()
         await self.controller.aclose()
         if self.stream is not None and self.stream.running:
             await self.stream.stop()
@@ -218,6 +223,25 @@ def wire_ai_review(review: AIReviewService, controller: AnalysisController, anal
 
     controller.after_scan = after_swing
     scalp.after_scan = after_scalp
+
+
+def wire_futures_review(review: AIReviewService, futures: FuturesService) -> None:
+    """Show AI verdicts on futures signals too (filter mode: a reject turns the trade into WATCH)."""
+    previous = review.on_review
+
+    def apply(result: dict[str, Any]) -> None:
+        if result.get("kind") != "futures":
+            if previous is not None:
+                previous(result)
+            return
+        for sig in (futures.results.get(result.get("horizon") or "") or {}).get("signals", []):
+            if sig["symbol"] == result["symbol"]:
+                sig["ai_review"] = result
+                if review.caps(result) and sig["signal"] in ("BUY", "STRONG BUY"):
+                    sig["signal"], sig["label"] = "WATCH", "WATCH"
+                    sig["reasons"] = [f"AI reviewer rejected it: {result['summary']}", *sig["reasons"]]
+
+    review.on_review = apply
 
 
 def build_container(
@@ -403,6 +427,7 @@ def build_container(
     tracker = OutcomeTracker(
         session_factory,
         cost_pct=lambda strategy: analysis.risk_params.round_trip_cost_pct if strategy == STRATEGY
+        else 2.0 * (futures.fee_pct + futures.slippage_pct) if strategy.startswith("fut_")
         else 2.0 * (analysis.risk_params.fee_pct + settings.scalp_slippage_pct),
     )
     analysis.on_candles = tracker.update
@@ -443,6 +468,12 @@ def build_container(
     analysis.evidence = evidence
     scalp.evidence = evidence
     scalp.market_regime = regime.current
+    futures = FuturesService(
+        settings, universe, assets, scalp, store, risk_params=lambda: analysis.risk_params,
+        equity=portfolio.equity_at_cost, derivatives=derivatives, evidence=evidence, selection_filter=selection.filter,
+        session_factory=session_factory, on_candles=tracker.update, blocked=lambda: state.emergency_stop,
+    )
+    wire_futures_review(ai_review, futures)
     return Container(
         settings=settings,
         http=http,
@@ -476,6 +507,7 @@ def build_container(
         derivatives=derivatives,
         evidence=evidence,
         learning=learning,
+        futures=futures,
         stream=stream,
         live_prices=live_prices,
         cmc=cmc_client,

@@ -62,7 +62,7 @@ class Settings(BaseSettings):
 
     # --- application ---------------------------------------------------------
     app_name: str = "Crypto Market Analysis & Spot Signal Dashboard"
-    app_version: str = "1.1.0-phase11"
+    app_version: str = "1.2.0-phase12"
     environment: Literal["development", "test", "production"] = "development"
     log_level: str = "INFO"
     json_logs: bool = True
@@ -236,6 +236,13 @@ class Settings(BaseSettings):
     evidence_news_max_age_minutes: int = 30  # scans reload headlines older than this (free sources)
     evidence_refresh_news_default: bool = True  # the dashboard switch "reload headlines before scans"
     ai_news_cache_minutes: int = 45  # the AI reading of the headlines is reused this long
+
+    # --- Phase 12: futures signals (USDT perpetuals, analysis only) -------------------------
+    futures_enabled: bool = True
+    futures_fee_pct: float = 0.05  # taker fee per side (Binance USD-M regular tier; 0.045 with the BNB discount)
+    futures_slippage_pct: float = 0.02  # per side
+    futures_max_leverage: int = 5  # the plan never suggests more (you can change it in the dashboard, up to 20)
+    futures_maintenance_margin_pct: float = 1.0  # conservative for altcoins (BTC/ETH tiers are lower)
 
     # --- token unlocks and airdrops (optional keys) -------------------------------------
     events_cache_seconds: int = 21600

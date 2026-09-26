@@ -2,7 +2,8 @@
 
 import asyncio
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from email.utils import format_datetime
 
 import httpx
 import pytest
@@ -14,14 +15,16 @@ from app.services.analysis import analysis_out
 from app.services.news import headline_sentiment, parse_cryptocompare, parse_feed, parse_trending, tag_assets
 from tests.test_api import _make_client
 
-RSS = b"""<?xml version="1.0"?><rss version="2.0"><channel><title>x</title>
+# Headline times are relative to now, so the "last 48 hours" windows keep working on any date.
+NEWS_TIME = (datetime.now(UTC) - timedelta(hours=2)).replace(minute=0, second=0, microsecond=0)
+RSS = f"""<?xml version="1.0"?><rss version="2.0"><channel><title>x</title>
 <item><title>Bitcoin surges to record high as ETF inflows jump</title><link>https://news.example/a</link>
-<pubDate>Wed, 24 Sep 2026 10:00:00 GMT</pubDate><description>&lt;p&gt;BTC and Solana rally&lt;/p&gt;</description></item>
+<pubDate>{format_datetime(NEWS_TIME, usegmt=True)}</pubDate><description>&lt;p&gt;BTC and Solana rally&lt;/p&gt;</description></item>
 <item><title>Exchange hack drains funds</title><link>https://news.example/b</link></item>
 <item><title>No link here</title></item>
-</channel></rss>"""
-ATOM = b"""<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"><entry><title>Ethereum upgrade launches</title>
-<link href="https://news.example/c"/><updated>2026-09-24T09:00:00Z</updated><summary>ETH</summary></entry></feed>"""
+</channel></rss>""".encode()
+ATOM = f"""<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"><entry><title>Ethereum upgrade launches</title>
+<link href="https://news.example/c"/><updated>{(NEWS_TIME - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")}</updated><summary>ETH</summary></entry></feed>""".encode()
 
 
 def news_handler(request: httpx.Request) -> httpx.Response:
@@ -145,7 +148,7 @@ async def test_watchlist_adds_coins_to_the_universe_and_persists(app_env):
 def test_feed_parsers_and_sentiment():
     items = parse_feed(RSS, "feed.example")
     assert [i.title for i in items] == ["Bitcoin surges to record high as ETF inflows jump", "Exchange hack drains funds"]
-    assert items[0].published_at == datetime(2026, 9, 24, 10, tzinfo=UTC) and items[0].summary == "BTC and Solana rally"
+    assert items[0].published_at == NEWS_TIME and items[0].summary == "BTC and Solana rally"
     atom = parse_feed(ATOM, "atom.example")
     assert atom[0].url == "https://news.example/c" and atom[0].published_at is not None
     assert parse_cryptocompare({"Data": [{"title": "t", "url": "ftp://x"}]}) == []

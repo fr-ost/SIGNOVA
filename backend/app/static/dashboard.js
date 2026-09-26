@@ -127,8 +127,8 @@
     return h("span", { class: `delta ${dir}` }, arrow + fmtPct(value, digits));
   }
 
-  function kv(label, value) {
-    return h("div", { class: "kv" }, h("dt", { text: label }), h("dd", {}, value ?? DASH));
+  function kv(label, value, cls) {
+    return h("div", { class: cls ? `kv ${cls}` : "kv" }, h("dt", { text: label }), h("dd", {}, value ?? DASH));
   }
 
   function card(title, meta, ...body) {
@@ -1054,7 +1054,7 @@
       timer = null;
       if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
     }
-    for (const id of ["analyze", "live", "auto-analyze", "scalp-scan", "refresh", "news-refresh", "mood-refresh", "events-refresh", "lab-run", "ev-market"]) {
+    for (const id of ["analyze", "live", "auto-analyze", "scalp-scan", "refresh", "news-refresh", "mood-refresh", "events-refresh", "lab-run", "ev-market", "futures-scan"]) {
       const el = $(id);
       if (el) el.disabled = on || (id === "analyze" && controlState && controlState.scan.running);
     }
@@ -1101,8 +1101,10 @@
     }
     if (s.scalp) renderScalpStatus(s.scalp);
     if (s.lab) renderLabStatus(s.lab);
+    if (s.futures) renderFuturesStatus(s.futures);
     applyEmergency(s.emergency_stop);
-    const scalpRunning = (s.scalp && Object.values(s.scalp).some((x) => x.running)) || (s.lab && Object.values(s.lab).some((x) => x.running));
+    const scalpRunning = (s.scalp && Object.values(s.scalp).some((x) => x.running)) || (s.lab && Object.values(s.lab).some((x) => x.running))
+      || (s.futures && Object.values(s.futures).some((x) => x.running));
     scheduleControl(s.scan.running || scalpRunning ? 2000 : 30000);
     if (s.live.running && !liveTimer) liveTimer = setInterval(refreshLive, 5000);
     if (!s.live.running && liveTimer) {
@@ -1392,7 +1394,9 @@
   const scalpOpen = new Set();
 
   function fmtR(v) {
-    return v == null ? DASH : `${v > 0 ? "+" : v < 0 ? "−" : ""}${Math.abs(v).toFixed(2)}R`;
+    if (v == null) return DASH;
+    const r = Math.round(v * 100) / 100; // no "−0.00R"
+    return `${r > 0 ? "+" : r < 0 ? "−" : ""}${Math.abs(r).toFixed(2)}R`;
   }
 
   function backtestText(bt) {
@@ -1436,12 +1440,12 @@
       const p = sig.plan;
       parts.push(h("dl", { class: "detail-grid compact" },
         kv("Buy zone", `${fmtPrice(p.entry_low)} to ${fmtPrice(p.entry_high)}`),
-        kv("Take profit", p.exit_rule || `TP1 ${fmtPrice(p.tp1)}, TP2 ${fmtPrice(p.tp2)}`),
         kv("Stop", `${fmtPrice(p.stop)} (−${p.risk_pct.toFixed(2)}%)`),
         kv("Net R:R", `${p.reward_risk_tp1.toFixed(2)} at TP1 · ${p.reward_risk_tp2.toFixed(2)} at TP2`),
         kv("Size", `${p.suggested_allocation_pct.toFixed(1)}% of portfolio (risks ${p.risk_at_allocation_pct.toFixed(2)}%)`),
         kv("Costs", `${p.cost_pct.toFixed(2)}% round trip`),
-        kv("Valid until", `${fmtTime(p.valid_until)} · ${p.time_exit}`),
+        kv("Take profit", p.exit_rule || `TP1 ${fmtPrice(p.tp1)}, TP2 ${fmtPrice(p.tp2)}`, "wide"),
+        kv("Valid until", `${fmtTime(p.valid_until)} · ${p.time_exit}`, "wide"),
       ));
     }
     if (sig.expected && sig.expected.risk_per_trade) {
@@ -1539,7 +1543,7 @@
     const valid = rows.filter((r) => r.validated).length;
     $("scalp-research-meta").textContent = ` · ${valid} of ${rows.length} validated on these coins`;
     const cell = (sp) => (sp && sp.trades ? [fmtR(sp.expectancy_r), h("div", { class: "muted small", text: `${sp.trades} tr · ${Math.round(sp.win_rate ?? 0)}%` })] : [DASH]);
-    const sorted = rows.slice().sort((a, b) => (b.validated - a.validated) || ((b.all.expectancy_r ?? -9) - (a.all.expectancy_r ?? -9)));
+    const sorted = rows; // the server orders them: validated, then enough trades to judge, then closest to enough
     $("scalp-research-body").replaceChildren(
       table([["Strategy"], ["Older 70%", "num"], ["Newer 30%", "num"], ["All", "num hide-sm"], ["Exit", "hide-sm"], ["Verdict"]],
         sorted.map((r) => h("tr", { class: r.validated ? "chosen" : null },
@@ -2224,6 +2228,236 @@
     }
   }
 
+  // ---------------------------------------------------------------- futures signals (phase 12)
+
+  let futuresHorizon = "1h";
+  let lastFutures = null;
+  const futuresOpen = new Set();
+  const futuresSeen = {};
+  const isTrade = (sig) => sig.signal === "BUY" || sig.signal === "STRONG BUY";
+
+  function sideChip(side) {
+    if (!side) return null;
+    return h("span", { class: `side-chip ${side}` },
+      h("span", { class: "side-mark", "aria-hidden": "true", text: side === "long" ? "▲" : "▼" }), side === "long" ? "Long" : "Short");
+  }
+
+  function futuresBadge(sig) {
+    const tone = isTrade(sig) ? "good" : sig.signal === "WATCH" ? "warning" : "neutral";
+    return toneBadge(tone, humanize(sig.label));
+  }
+
+  function futuresResearchTable(rows) {
+    const cell = (sp) => (sp && sp.trades ? [fmtR(sp.expectancy_r), h("div", { class: "muted small", text: `${sp.trades} tr · ${Math.round(sp.win_rate ?? 0)}%` })] : [DASH]);
+    const cls = (v) => `num ${v > 0 ? "pnl-up" : v < 0 ? "pnl-down" : ""}`;
+    const sorted = rows; // the server orders them: validated, then enough trades to judge, then closest to enough
+    return table([["Strategy"], ["Side"], ["Older 70%", "num"], ["Newer 30%", "num"], ["All", "num hide-sm"], ["Verdict"]],
+      sorted.map((r) => h("tr", { class: r.validated ? "chosen" : null },
+        h("td", { title: r.source }, h("strong", { class: "small", text: r.name }), h("div", { class: "muted small rule-text", text: r.rule })),
+        h("td", {}, sideChip(r.side)),
+        h("td", { class: cls(r.train.expectancy_r) }, ...cell(r.train)),
+        h("td", { class: cls(r.test.expectancy_r) }, ...cell(r.test)),
+        h("td", { class: "num hide-sm" }, ...cell(r.all)),
+        h("td", {}, toneBadge(r.validated ? "good" : "neutral", r.validated ? "Validated" : "Not validated"),
+          h("div", { class: "muted small", text: r.reasons[0] || "" })))));
+  }
+
+  function futuresDetail(sig) {
+    const parts = [];
+    if (sig.would_be) parts.push(heldBackNote(sig.filtered_by, sig.would_be));
+    const reviewBox = h("div", { class: "pad" }, sig.ai_review ? aiReviewBlock(sig.ai_review) : null);
+    const reviewBtn = h("button", { type: "button", class: "small", text: sig.ai_review ? "Review again with AI" : "AI review",
+      title: "Ask the OpenAI model for a second opinion on this futures setup (uses your OpenAI credits)" });
+    reviewBtn.addEventListener("click", (e) => { e.stopPropagation(); requestReview("futures", sig.symbol, sig.horizon, reviewBox, reviewBtn); });
+    parts.push(h("div", { class: "pad review-row" }, reviewBtn), reviewBox);
+    if (sig.strategy) {
+      const stg = sig.strategy;
+      parts.push(h("div", { class: "pad strategy-box" },
+        h("strong", { class: "small" }, "Strategy: ", stg.name, " ", sideChip(sig.side)),
+        h("p", { class: "small", text: stg.rule }),
+        h("p", { class: "muted small", text: `Source: ${stg.source}` }),
+        sig.also && sig.also.length ? h("p", { class: "muted small", text: `Also fired now: ${sig.also.join(" · ")}` }) : null));
+    }
+    if (!sig.plan && sig.pending) {
+      const w = sig.pending;
+      parts.push(h("div", { class: "pad conditional" },
+        h("strong", { class: "small" }, "Not a trade yet: conditional plan ", sideChip(w.side)),
+        h("p", { class: "small", text: w.text }),
+        h("dl", { class: "detail-grid compact" },
+          kv(w.side === "long" ? "Trigger (close above)" : "Trigger (close below)", fmtPrice(w.trigger)),
+          kv("Stop", `${fmtPrice(w.stop)} (${w.side === "long" ? "−" : "+"}${w.risk_pct.toFixed(2)}%)`),
+          kv("TP1 / TP2", `${fmtPrice(w.tp1)} / ${fmtPrice(w.tp2)}`))));
+    }
+    const p = sig.plan;
+    const lev = sig.leverage;
+    if (p && lev) {
+      const usd = (v) => (v == null ? "" : ` (${fmtUsd(v)})`);
+      parts.push(h("dl", { class: "detail-grid compact" },
+        kv("Direction", sideChip(p.side)),
+        kv("Entry zone", `${fmtPrice(p.entry_low)} to ${fmtPrice(p.entry_high)} (signal ${fmtPrice(p.entry)})`),
+        kv("Stop", `${fmtPrice(p.stop)} (${p.side === "long" ? "−" : "+"}${p.risk_pct.toFixed(2)}%)`),
+        kv("Leverage", `${lev.leverage}x isolated · margin ${lev.margin_pct_of_equity.toFixed(1)}% of equity${usd(lev.margin_usd)}`),
+        kv("Position size", `${lev.notional_pct_of_equity.toFixed(0)}% of equity${usd(lev.notional_usd)}`),
+        kv("Loss at the stop", `≈ ${lev.risk_pct_of_equity.toFixed(2)}% of equity${usd(lev.loss_at_stop_usd)} incl. costs`),
+        kv("Liquidation (est.)", `${fmtPrice(lev.liquidation_price)} · ${lev.liquidation_distance_pct.toFixed(1)}% away; the stop is ${p.risk_pct.toFixed(2)}% away`),
+        kv("Funding", sig.funding_pct == null ? "unknown" : `${sig.funding_pct >= 0 ? "+" : ""}${sig.funding_pct.toFixed(4)}%/8h · ${lev.funding_pct > 0 ? "you pay" : "you receive"} ≈ ${Math.abs(lev.funding_pct).toFixed(3)}% over the hold`),
+        kv("Costs", `${p.cost_pct.toFixed(2)}% round trip (fees + slippage)`),
+        sig.basis_pct != null ? kv("Perpetual vs spot", `${sig.basis_pct >= 0 ? "+" : ""}${sig.basis_pct.toFixed(2)}%`) : null,
+        kv("Take profit", p.exit_rule, "wide"),
+        kv("Valid until", `${fmtTime(p.valid_until)} · ${p.time_exit}`, "wide")));
+      if (lev.notes && lev.notes.length) parts.push(h("div", { class: "pad" }, plainList(lev.notes, "small muted")));
+    }
+    parts.push(h("div", { class: "pad" }, h("strong", { class: "small", text: "Why" }), plainList(sig.reasons, "small")));
+    if (sig.risks && sig.risks.length) parts.push(h("div", { class: "pad" }, h("strong", { class: "small", text: "Risks" }), plainList(sig.risks, "small")));
+    if (sig.record && sig.record.trades) {
+      const r = sig.record;
+      parts.push(h("p", { class: "small pad muted", text: `This strategy on ${sig.symbol} (${sig.side}): ${r.trades} past trades, ${Math.round(r.win_rate ?? 0)}% winners, ${fmtR(r.expectancy_r)} per trade after costs.` }));
+    }
+    if (sig.board) {
+      const lv = p ? { entry: p.entry, stop: p.stop, tp2: p.tp2 } : sig.pending ? { entry: sig.pending.trigger, stop: sig.pending.stop, tp2: sig.pending.tp2 } : {};
+      parts.push(h("div", { class: "ev-inline" }, h("div", { class: "pad-tight" }, h("strong", { class: "small" }, "Evidence board for this ", sig.side || "", " trade")),
+        evidenceBlock(sig.board, lv)));
+    }
+    return parts;
+  }
+
+  function futuresRows(sig) {
+    const open = futuresOpen.has(sig.symbol);
+    const toggle = () => {
+      if (futuresOpen.has(sig.symbol)) futuresOpen.delete(sig.symbol); else futuresOpen.add(sig.symbol);
+      renderFutures(lastFutures);
+    };
+    const p = sig.plan;
+    const w = !p ? sig.pending : null;
+    const cls = isTrade(sig) ? "num" : "num muted";
+    const level = (value, sub) => (value == null ? [DASH] : [fmtPrice(value), sub ? h("div", { class: "muted small", text: sub }) : null]);
+    const entry = p ? level(p.entry, p.side === "long" ? "long entry" : "short entry")
+      : w ? [h("span", { class: "cond", text: `${w.side === "long" ? "> " : "< "}${fmtPrice(w.trigger)}` }), h("div", { class: "muted small", text: "trigger" })] : [DASH];
+    const stopSub = (x) => `${x.side === "long" ? "−" : "+"}${x.risk_pct.toFixed(2)}%`;
+    const lev = sig.leverage;
+    const row = h(
+      "tr",
+      { class: `clickable${open ? " open" : ""}${w ? " waiting" : ""}`, onclick: toggle, "aria-expanded": open ? "true" : "false" },
+      h("td", {}, h("div", { class: "asset-cell" }, h("strong", { text: sig.symbol }), h("span", { class: "muted small", text: sig.name }))),
+      h("td", {}, h("div", { class: "fut-signal" }, sideChip(sig.side), futuresBadge(sig)),
+        sig.status ? h("div", { class: "muted small status-line", text: sig.status }) : null, aiChip(sig.ai_review),
+        sig.board ? evidenceChip(sig.board.score, sig.board.grade, sig.board.vetoes && sig.board.vetoes.length) : null),
+      h("td", { class: "hide-sm", title: sig.strategy ? sig.strategy.source : null },
+        sig.strategy ? sig.strategy.name : w ? humanize(w.kind) : DASH,
+        sig.also && sig.also.length ? h("div", { class: "muted small", text: `+${sig.also.length} more` }) : null),
+      h("td", { class: cls }, ...entry),
+      h("td", { class: cls }, ...(p ? level(p.stop, stopSub(p)) : w ? level(w.stop, stopSub(w)) : [DASH])),
+      h("td", { class: cls }, ...(p ? level(p.tp1, fmtPrice(p.tp2)) : w ? level(w.tp1, fmtPrice(w.tp2)) : [DASH])),
+      h("td", { class: cls }, ...(lev ? [`${lev.leverage}x`, h("div", { class: "muted small", text: `liq ${fmtPrice(lev.liquidation_price)}` })] : [DASH])),
+      h("td", { class: "hide-sm" }, h("span", { class: "reason", text: sig.reasons[0] || "" })),
+    );
+    if (!open) return [row];
+    return [row, h("tr", { class: "detail-row" }, h("td", { colspan: 8 }, h("div", { class: "scalp-detail" }, ...futuresDetail(sig))))];
+  }
+
+  function renderFutures(res) {
+    lastFutures = res;
+    const rows = $("futures-rows");
+    const why = $("futures-why");
+    const box = $("futures-research");
+    if (!res) {
+      rows.replaceChildren(h("tr", {}, h("td", { colspan: 8, class: "empty", text: "No futures scan yet for this horizon. Press “Find futures trades”." })));
+      $("futures-meta").textContent = "";
+      why.hidden = true;
+      box.hidden = true;
+      return;
+    }
+    const c = res.counts;
+    $("futures-meta").textContent = `${res.label}: setup ${res.setup_timeframe}, trend ${res.trend_timeframe} · ${c.LONG} long, ${c.SHORT} short, `
+      + `${c.WATCH} watch · costs ${res.cost_pct.toFixed(2)}% · ${fmtTime(res.generated_at)}`;
+    if (res.no_trade_reason) {
+      why.replaceChildren(h("strong", { text: "Why no trade: " }), res.no_trade_reason);
+      why.hidden = false;
+    } else {
+      why.hidden = true;
+    }
+    const research = res.research || [];
+    if (research.length) {
+      $("futures-research-meta").textContent = ` · ${research.filter((r) => r.validated).length} of ${research.length} validated on these coins`;
+      $("futures-research-body").replaceChildren(futuresResearchTable(research),
+        h("p", { class: "muted small", text: "Per trade in R after futures fees, slippage and a funding allowance, pooled over the scanned coins. "
+          + "Shorts are researched on the mirrored chart, so each side is proven on its own." }));
+      box.hidden = false;
+    } else {
+      box.hidden = true;
+    }
+    const err = $("futures-error");
+    if (res.errors.length) setMessage(err, "Some coins could not be analysed", res.errors.slice(0, 5)); else err.hidden = true;
+    rows.replaceChildren(...(res.signals.length ? res.signals.flatMap(futuresRows)
+      : [h("tr", {}, h("td", { colspan: 8, class: "empty", text: "No coins analysed (check Coins to analyse)." }))]));
+  }
+
+  async function refreshFutures() {
+    const horizon = futuresHorizon;
+    try {
+      const r = await getJSON(`/api/futures?horizon=${horizon}`);
+      if (horizon !== futuresHorizon) return;
+      renderFutures(r.result);
+      renderFuturesStatus(r.status);
+      if (r.settings) $("futures-lev").value = String(r.settings.max_leverage);
+    } catch (err) {
+      if (horizon === futuresHorizon) setMessage($("futures-error"), `Futures signals unavailable: ${err.message}`);
+    }
+  }
+
+  function renderFuturesStatus(all) {
+    if (!all) return;
+    const st = all[futuresHorizon];
+    const button = $("futures-scan");
+    button.disabled = !!(st && st.running) || emergency;
+    button.textContent = st && st.running ? "Scanning…" : "Find futures trades";
+    let text = "";
+    if (st) {
+      if (st.running) text = `Researching both sides… ${st.done}/${st.total || "?"}`;
+      else if (st.outcome === "stopped") text = `Stopped ${fmtTime(st.finished_at)}`;
+      else if (st.outcome === "failed") text = `Scan failed: ${st.error || "unknown error"}`;
+    }
+    $("futures-status").textContent = text;
+    $("futures-progress").style.width = st && st.running && st.total ? `${(st.done / st.total) * 100}%` : "0%";
+    for (const [key, value] of Object.entries(all)) {
+      const seen = futuresSeen[key];
+      if (value.finished_at && seen !== undefined && seen !== value.finished_at && key === futuresHorizon) {
+        refreshFutures();
+        refreshRecord();
+      }
+      futuresSeen[key] = value.finished_at;
+    }
+  }
+
+  function setFuturesHorizon(key) {
+    futuresHorizon = key;
+    renderFutures(null);
+    pref("futuresHorizon", key);
+    document.querySelectorAll("[data-fhorizon]").forEach((b) => b.setAttribute("aria-checked", b.dataset.fhorizon === key ? "true" : "false"));
+    futuresOpen.clear();
+    refreshFutures();
+  }
+
+  async function startFutures() {
+    try {
+      const r = await api(`/api/futures/scan?horizon=${futuresHorizon}`, { method: "POST" });
+      renderFuturesStatus(r.status);
+      scheduleControl(1000);
+    } catch (err) {
+      setMessage($("futures-error"), `Could not start the scan: ${err.message}`);
+    }
+  }
+
+  async function saveFuturesLeverage() {
+    try {
+      const s = await api("/api/futures/settings", { method: "PUT", body: { max_leverage: Number($("futures-lev").value) } });
+      $("futures-status").textContent = `Plans now use at most ${s.max_leverage}x (next scan).`;
+    } catch (err) {
+      window.alert(`Could not save: ${err.message}`);
+      refreshFutures();
+    }
+  }
+
   // ---------------------------------------------------------------- AI review (phase 7)
 
   const VERDICT_TONE = { agree: "good", caution: "warning", reject: "critical" };
@@ -2250,7 +2484,7 @@
     try {
       const review = await api("/api/ai/review", { method: "POST", body: { kind, symbol, horizon: horizon || null, model: $("chat-model").value || null }, timeoutMs: 180000 });
       container.replaceChildren(aiReviewBlock(review));
-      if (kind === "scalp") refreshScalp(); else refreshSignals();
+      if (kind === "scalp") refreshScalp(); else if (kind === "futures") refreshFutures(); else refreshSignals();
     } catch (err) {
       container.replaceChildren(h("p", { class: "muted small", text: `AI review unavailable: ${err.message}` }));
     } finally {
@@ -2857,6 +3091,11 @@
     document.querySelectorAll(".segmented [data-horizon]").forEach((b) => b.addEventListener("click", () => setHorizon(b.dataset.horizon)));
     setHorizon(["15m", "4h", "1d"].includes(savedHorizon) ? savedHorizon : "1h");
     $("scalp-scan").addEventListener("click", startScalp);
+    const savedFutures = pref("futuresHorizon");
+    document.querySelectorAll("[data-fhorizon]").forEach((b) => b.addEventListener("click", () => setFuturesHorizon(b.dataset.fhorizon)));
+    setFuturesHorizon(["15m", "4h", "1d"].includes(savedFutures) ? savedFutures : "1h");
+    $("futures-scan").addEventListener("click", startFutures);
+    $("futures-lev").addEventListener("change", saveFuturesLeverage);
     const savedLab = pref("labHorizon");
     document.querySelectorAll("[data-lab-horizon]").forEach((b) => b.addEventListener("click", () => setLabHorizon(b.dataset.labHorizon)));
     setLabHorizon(["15m", "4h", "1d"].includes(savedLab) ? savedLab : "1h");

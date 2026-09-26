@@ -1,10 +1,11 @@
-# Crypto Market Analysis & Spot Signal Dashboard
+# Crypto Market Analysis & Signal Dashboard (spot and futures)
 
-Railway-hosted market analysis and **spot-only** trading-signal dashboard for the
-CoinMarketCap Top 20 (stablecoins excluded). FastAPI, PostgreSQL, React (from Phase 3),
-OpenAI (from Phase 7).
+Railway-hosted market analysis and trading-signal dashboard for the CoinMarketCap Top 20
+(stablecoins excluded): spot signals, and from Phase 12 long and short signals for USDT
+perpetual futures. FastAPI, PostgreSQL, React (from Phase 3), OpenAI (from Phase 7).
 
-No futures, no leverage, no short selling, no trade execution, no exchange credentials.
+Analysis only: no trade execution, no exchange credentials. Futures signals are plans you place
+yourself, with leverage kept within your cap and the liquidation price far beyond the stop.
 Nothing in this project promises profitability or accuracy.
 
 ## Status
@@ -22,6 +23,7 @@ Nothing in this project promises profitability or accuracy.
 | 9 | ML / statistical prediction | **Done**: statistical trade filter, used only after it validates on newer data |
 | 10 | Evidence engine | **Done**: futures positioning, liquidations and an estimated liquidation map, order flow, news read by the AI, hype, market trend; tracks the setups it holds back and learns from outcomes |
 | 11 | Strategy library | **Done**: 8 published strategies (Turtle breakout, Connors RSI(2), Bollinger, momentum, price action, market structure...) with their own exits, walk-forward research on every scan, 1-day horizon, "why no buy" |
+| 12 | Futures signals | **Done**: long and short trades on USDT perpetuals, every strategy researched for each side with futures costs, side-aware evidence board, leverage plan with the liquidation price beyond the stop, shorts in the track record |
 
 ## Decision hierarchy
 
@@ -311,12 +313,77 @@ strategies fire on one coin, the best-validated one is shown ("+1 more" lists th
 held back and why (price already ran, lost on this coin, a filter), or that nothing made money
 at this horizon, and what to try: another horizon, more coins (a bigger sample validates sooner),
 or lower fees. The **Strategy research** table shows every strategy's result on the older and
-newer data. The **1-day horizon** (4H candles, 1D trend, up to 2 days per trade) pays much less
-in fees relative to the move, which is often where the edge is.
+newer data: validated strategies first, then those with enough trades to judge, then the ones
+closest to enough trades (a few lucky trades never top the table). The **1-day horizon** (4H
+candles, 1D trend, up to 2 days per trade) pays much less in fees relative to the move, which is
+often where the edge is.
 
 Trailing and indicator exits are followed the same way by the track record (the exit rule is
 stored with each signal), and the plan tells you how to manage the trade ("trail: stop at the
 lowest low of the last 20 candles, raise it after each candle").
+
+## Futures signals (Phase 12)
+
+The **Futures signals** card finds long **and short** trades on USDT perpetuals for the coins
+you select, at 15 minutes, 1 hour, 4 hours or 1 day. Analysis only: you place every order on
+your exchange.
+
+**Shorts are proven the same way as longs.** For a short, the candles are mirrored (price becomes
+K / price, so highs become lows, a downtrend becomes an uptrend, and taker buying becomes taker
+selling). Every strategy of the library, its backtest and its exits then describe the short
+exactly: a close above the 55-candle high on the mirror is a close below the 55-candle low on
+the real chart, and a trailing stop under the mirror's lows is a stop above the real highs. Each
+of the 8 strategies is researched for both sides (16 pairs), and a short can signal only after
+shorting with that strategy made money on the older 70% and the newer 30% of your coins'
+history (the same gates as Phase 11). The Turtle rule becomes a 55-candle breakdown, Connors
+RSI(2) sells a bounce above 90 below EMA200, and so on; the research table shows each short
+rule.
+
+**Futures costs** in every backtest: taker fee 0.05% and slippage 0.02% per side (settings),
+plus funding at the usual 0.01% per 8 hours over the typical holding time.
+
+**Labels:** LONG, STRONG LONG, SHORT, STRONG SHORT, WATCH or NO TRADE. When a long and a short
+both qualify on one coin, the answer is WATCH (no clear direction). A coin with no USDT perpetual
+on Binance, Bybit, OKX or Hyperliquid is NO TRADE. Signals use the spot price, which is the
+index the perpetual's mark price follows.
+
+**Evidence board for shorts:** the same factors, read for the side you trade. Longs paying
+funding, price falling while open interest rises, crowded longs, taker selling, weakness against
+Bitcoin and a risk-off market all count *for* a short. Short vetoes:
+- crowded, leveraged shorts: funding at −0.05% per 8 hours or lower with open interest up 10%+ in
+  24 hours (squeeze risk);
+- a short squeeze in progress;
+- a major positive catalyst in the news.
+
+The liquidation map is read for the short too. Short liquidations just above the stop can
+squeeze through it, and the plan suggests a stop above that zone. Long liquidations below the
+entry can fuel a drop toward the targets.
+
+**The plan** comes with every signal and every held-back setup: entry zone, stop, targets and the
+exit rule in real prices (for example "buy back 50% at ..., then move the stop to the entry;
+trail the rest: stop at the lowest low since entry plus 3 ATR"). It also includes a leverage plan:
+- **Position size** = your risk per trade (Portfolio > Risk, 1% by default) divided by (stop
+  distance + costs + funding). At the stop you lose the same share of your equity at 1x or 20x.
+  Leverage only changes the margin you post.
+- **Leverage** is the highest value up to your cap (5x by default, 20x at most) whose estimated
+  isolated liquidation price stays beyond the stop. The gap must be at least half the stop
+  distance, and at least 1%. The estimate is entry × (1 − 1/L + MMR) for a long and
+  entry × (1 + 1/L − MMR) for a short, with a 1% maintenance margin (conservative for altcoins).
+- **Funding** is shown per 8 hours, with what you pay or receive over the hold (longs pay a
+  positive rate, shorts receive it).
+- **Mark versus spot:** a gap (basis) of 0.3% or more is flagged.
+
+**Track record:** futures signals are followed like the scalps and appear as "Futures 15m / 1h /
+4h / 1d". Shorts are followed on mirrored candles: a short wins when price falls to its targets
+and loses when it rises to its stop. Held-back setups are tracked in their own lane. The AI
+review (Phase 7) also works on futures signals.
+
+Leverage does not change a strategy's edge; it multiplies mistakes. The plan keeps the loss at
+the stop at your risk per trade, but gaps, exchange outages and auto-deleveraging can fill a
+real order beyond the stop. Start with 1-3x. You can change the cap in the card (**Max
+leverage**) or with `FUTURES_MAX_LEVERAGE`.
+
+`POST /api/futures/scan?horizon=4h` (token), `GET /api/futures?horizon=4h`, `GET/PUT /api/futures/settings` (PUT: token).
 
 ## Evidence engine (Phase 10)
 
@@ -445,7 +512,7 @@ Settings are in the AI assistant card and stored in `app_settings`.
 
 The red **Emergency stop** button in the header halts everything at once: the running scan
 (coins in progress may finish for up to 20 seconds, then it is cancelled), Auto-analyze, live
-prices, scalp scans, the Strategy lab and AI reviews. While it is engaged the server refuses
+prices, scalp and futures scans, the Strategy lab and AI reviews. While it is engaged the server refuses
 every request that would reach a provider, news source or OpenAI (HTTP 503), so no credits are
 spent, and the dashboard's auto-refresh stops. Stored signals, the track record, the last scalp
 scan and the lab results stay readable, and you can still edit the watchlist and coin
@@ -455,7 +522,7 @@ its own. `POST /api/control/kill` (optional `{"reason": "..."}`) and `POST /api/
 
 ## Track record
 
-Every BUY and STRONG BUY (swing and scalp) is followed on the candles after it with the same
+Every BUY and STRONG BUY (swing and scalp), and every futures LONG and SHORT, is followed on the candles after it with the same
 pessimistic simulator as the backtest: stop first, half at TP1 then break-even, targets, and a
 time limit (14 days for swing signals). A signal that appears while an earlier one on the same
 coin and strategy is still running is marked SKIPPED, so one move is never counted twice. It
@@ -651,6 +718,9 @@ Without `ADMIN_TOKEN`, anyone who finds the URL can use those controls.
 | `POST /api/scalp/scan?horizon=15m\|1h\|4h` (token) | Scalp scan of the selected coins, in the background |
 | `GET /api/scalp?horizon=1h` | Latest scalp scan (signals, per-coin backtest, pooled record) and scan status |
 | `GET /api/scalp/{symbol}?horizon=1h` (token) | Scalp analysis of one coin now |
+| `POST /api/futures/scan?horizon=15m\|1h\|4h\|1d` (token) | Phase 12: futures scan (long and short) of the selected coins, in the background |
+| `GET /api/futures?horizon=4h` | Phase 12: latest futures scan (signals with leverage plans, research for both sides) and scan status |
+| `GET/PUT /api/futures/settings` (PUT: token) | Phase 12: leverage cap, futures fee, slippage, maintenance margin |
 | `GET /api/performance?days=90` | Track record per strategy, by AI verdict, and the latest outcomes |
 | `POST /api/control/kill`, `POST /api/control/resume` (token) | Emergency stop and resume |
 | `GET /api/lab?horizon=1h`, `POST /run` · `/apply` · `/reset` (token) | Phase 8: Strategy lab result, run, apply or reset a rule variant |
@@ -659,7 +729,7 @@ Without `ADMIN_TOKEN`, anyone who finds the URL can use those controls.
 | `GET /api/evidence/{symbol}?horizon=swing\|15m\|1h\|4h` | Phase 10: the latest evidence board for a coin (never fetches) |
 | `GET /api/evidence/learning`, `POST /refresh`, `PUT` (token) | Phase 10: measured edge per factor, held-back results, learned model |
 | `GET /api/derivatives/market`, `GET /api/derivatives/{symbol}` | Phase 10: futures funding, open interest, long/short ratios, taker flow, liquidations |
-| `POST /api/ai/review` (token) | Phase 7: AI review of a scalp or swing signal (agree / caution / reject) |
+| `POST /api/ai/review` (token) | Phase 7: AI review of a swing, scalp or futures signal (agree / caution / reject) |
 | `GET/PUT /api/ai/settings` (PUT: token) | AI review mode (advisory / filter) and auto-review |
 | `POST /api/chat` | AI assistant (token); optional `model` and `reasoning_effort` |
 | `GET /api/portfolio`, `PUT /cash`, `POST/DELETE /positions`, `PUT /risk`, `POST /plan` | Portfolio, risk settings, trade plan (token) |
@@ -739,6 +809,8 @@ Portfolio > Risk settings, which are stored in the database and take precedence.
 | `MOBULA_API_KEY` / `ALPHADROPS_API_KEY` | unset | token unlocks / airdrops |
 | `EVENTS_CACHE_SECONDS` / `UNLOCK_WINDOW_DAYS` | 21600 / 30 | unlock and airdrop cadence, unlock window |
 | `SCALP_SLIPPAGE_PCT` / `SCALP_MIN_RISK_COST_MULTIPLE` / `SCALP_MIN_TRADES` | 0.02 / 2.5 / 15 | scalp costs, fee filter, evidence minimum |
+| `FUTURES_ENABLED` / `FUTURES_MAX_LEVERAGE` | true / 5 | Phase 12 futures signals, leverage cap for the plans (1-20) |
+| `FUTURES_FEE_PCT` / `FUTURES_SLIPPAGE_PCT` / `FUTURES_MAINTENANCE_MARGIN_PCT` | 0.05 / 0.02 / 1.0 | futures costs per side, maintenance margin for the liquidation estimate |
 | `REGIME_CACHE_SECONDS` | 600 | market regime refresh |
 | `CANDLE_FETCH_LIMIT` / `CANDLE_FETCH_LIMIT_LONG` | 500 / 1000 | candles per request (5m-1H / 4H-1D) |
 | `SIGNAL_PERSIST_ENABLED` / `FEATURE_PERSIST_TIMEFRAMES` | true / 1h,4h,1d | history storage |
@@ -792,6 +864,11 @@ Phase 11: trailing and exit-signal simulation, gap fills, every library strategy
 data, one-trade-at-a-time backtests, the research gates (both parts, trade counts, luck), verdicts,
 a validated strategy producing a BUY with its exit rule stored and followed by the track record,
 "why no buy", and the 1-day horizon.
+Phase 12: the candle mirror (a downtrend becomes an uptrend), shorts found in a falling market and
+longs in a rising one, the side-aware evidence board and short liquidation zones, leverage plans
+(liquidation beyond the stop, size from the risk per trade), a validated short becoming a SHORT
+with its plan, stored and tracked to a win on mirrored candles, NO TRADE past the stop or without a
+perpetual, and the futures endpoints, settings and emergency stop.
 Phase 10: every exchange parser against its documented payload (errors, 1000x contracts),
 exchange failover and region skipping, OKX USD open interest, the liquidation map (levels,
 crossed levels removed, long/short split), each evidence factor and veto, thin boards,
@@ -840,6 +917,8 @@ Phase 7: `services/ai_review.py`;
 Phase 8: `analysis/lab.py` (variant grid, walk-forward split, statistics), `services/lab.py`;
 Phase 9: `analysis/ml.py` (logistic regression and its validation);
 Phase 11: `analysis/strategies.py` (strategy library, exits, research, verdicts);
+Phase 12: `analysis/futures.py` (candle mirror, short rules, leverage and liquidation plan),
+`services/futures.py` (futures scan, research for both sides, judging, storage);
 Phase 10: `data/derivatives.py` (exchange parsers), `services/derivatives.py` (failover, cache),
 `analysis/liqmap.py` (liquidation map), `analysis/evidence.py` (factors, score, vetoes),
 `analysis/evidence_learn.py` and `services/learning.py` (learning from outcomes),
