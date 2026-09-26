@@ -275,6 +275,7 @@ dialog#detail::backdrop { background: rgba(0, 0, 0, 0.45); }
 }
 .kv dt { font-size: 12px; color: var(--muted); }
 .kv dd { margin: 2px 0 0; font-variant-numeric: tabular-nums; }
+.kv.wide { grid-column: 1 / -1; } /* long texts (exit rules) get a full row */
 
 .stages { list-style: none; margin: 0; padding: 0 16px 12px; }
 .stages > li { padding: 10px 0; border-top: 1px solid var(--grid); }
@@ -409,6 +410,7 @@ label.toggle { display: inline-flex; align-items: center; gap: 6px; cursor: poin
   --f-record: #b7791f;
   --f-lab: #ae3ec9;
   --f-evidence: #0d9488;
+  --f-futures: #e8590c;
   --viz-pos: #2a78d6;
   --viz-neg: #e34948;
   --shadow: 0 1px 2px rgba(15, 15, 20, 0.04), 0 10px 28px -16px rgba(15, 15, 20, 0.18);
@@ -420,7 +422,7 @@ label.toggle { display: inline-flex; align-items: center; gap: 6px; cursor: poin
   :root:not([data-theme="light"]) {
     --f-control: #4b93ec; --f-signals: #9a78f5; --f-portfolio: #2fc07e; --f-market: #27b4c1; --f-providers: #94a3b8;
     --f-chat: #8286f7; --f-watch: #e8b33a; --f-mood: #ef6b9b; --f-events: #34b3dc; --f-news: #f28544;
-    --f-scalp: #86cf3a; --f-record: #e0a84a; --f-lab: #cc5de8; --f-evidence: #2dd4bf; --viz-pos: #3987e5; --viz-neg: #e66767;
+    --f-scalp: #86cf3a; --f-record: #e0a84a; --f-lab: #cc5de8; --f-evidence: #2dd4bf; --f-futures: #ff8a3d; --viz-pos: #3987e5; --viz-neg: #e66767;
     --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 12px 30px -18px rgba(0, 0, 0, 0.7);
     --shadow-hover: 0 2px 4px rgba(0, 0, 0, 0.35), 0 20px 44px -18px rgba(0, 0, 0, 0.85);
     --glow: rgba(75, 147, 236, 0.10);
@@ -429,7 +431,7 @@ label.toggle { display: inline-flex; align-items: center; gap: 6px; cursor: poin
 :root[data-theme="dark"] {
   --f-control: #4b93ec; --f-signals: #9a78f5; --f-portfolio: #2fc07e; --f-market: #27b4c1; --f-providers: #94a3b8;
   --f-chat: #8286f7; --f-watch: #e8b33a; --f-mood: #ef6b9b; --f-events: #34b3dc; --f-news: #f28544;
-  --f-scalp: #86cf3a; --f-record: #e0a84a; --f-lab: #cc5de8; --f-evidence: #2dd4bf; --viz-pos: #3987e5; --viz-neg: #e66767;
+  --f-scalp: #86cf3a; --f-record: #e0a84a; --f-lab: #cc5de8; --f-evidence: #2dd4bf; --f-futures: #ff8a3d; --viz-pos: #3987e5; --viz-neg: #e66767;
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 12px 30px -18px rgba(0, 0, 0, 0.7);
   --shadow-hover: 0 2px 4px rgba(0, 0, 0, 0.35), 0 20px 44px -18px rgba(0, 0, 0, 0.85);
   --glow: rgba(75, 147, 236, 0.10);
@@ -478,6 +480,7 @@ body {
 .card[data-feature="record"] { --feat: var(--f-record); }
 .card[data-feature="lab"] { --feat: var(--f-lab); }
 .card[data-feature="evidence"] { --feat: var(--f-evidence); }
+.card[data-feature="futures"] { --feat: var(--f-futures); }
 .card[data-feature]::before {
   content: ""; position: absolute; inset: 0 0 auto 0; height: 3px;
   background: linear-gradient(90deg, var(--feat), color-mix(in srgb, var(--feat) 25%, transparent));
@@ -733,5 +736,18 @@ tr.chosen td { background: color-mix(in srgb, var(--f-lab) 8%, var(--surface)); 
 @media (max-width: 640px) { .research .rule-text { display: none; } #scalp-research-body table { min-width: 460px; } }
 .research table td .small { line-height: 1.35; }
 .strategy-box p { margin: 2px 0; }
+
+/* futures signals (phase 12) */
+.fut-signal { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; }
+.side-chip { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 600; color: var(--ink);
+  padding: 1px 7px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface); white-space: nowrap; }
+.side-chip .side-mark { font-size: 10px; }
+.side-chip.long .side-mark { color: var(--viz-pos); }
+.side-chip.short .side-mark { color: var(--viz-neg); }
+#futures-scan { background: linear-gradient(135deg, var(--f-futures), color-mix(in srgb, var(--f-futures) 55%, var(--f-signals))); }
+#futures-progress { background: linear-gradient(90deg, var(--f-futures), var(--f-signals), var(--f-futures)); background-size: 200% 100%; }
+[data-fhorizon][aria-checked="true"] { outline: 1px solid color-mix(in srgb, var(--f-futures) 45%, transparent) !important; }
+#futures-research-body { overflow-x: auto; }
+@media (max-width: 640px) { #futures-research-body table { min-width: 520px; } }
 
 .kill-banner[hidden], [hidden] { display: none !important; }

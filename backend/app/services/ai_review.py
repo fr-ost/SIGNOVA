@@ -45,6 +45,9 @@ thin liquidity or a wide spread, timeframes disagreeing, crowded funding, token 
 negative news tone, Bitcoin weakness, a stop that is too tight for costs. When an evidence board is
 included (futures funding, open interest, long/short ratios, top traders, liquidations and the
 estimated liquidation map, order flow, news and hype, market), weigh its factors too.
+A futures signal can be a LONG or a SHORT with leverage: for a SHORT the risks are mirrored (a squeeze,
+crowded shorts, positive news, strong market breadth), and check that the liquidation price is far beyond
+the stop.
 
 Rules:
 - Use only the data in SIGNAL. Never invent prices, news, or statistics.
@@ -238,7 +241,7 @@ class AIReviewService:
         """Attach the verdict to the stored signal it reviewed (the latest one within a day)."""
         if self._sessions is None:
             return
-        strategy = SWING_STRATEGY if kind == "swing" else f"scalp_{horizon}"
+        strategy = SWING_STRATEGY if kind == "swing" else f"fut_{horizon}" if kind == "futures" else f"scalp_{horizon}"
         try:
             async with self._sessions() as session:
                 row = (

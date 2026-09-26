@@ -26,6 +26,7 @@
     <symbol id="i-trophy" viewBox="0 0 24 24"><path d="M8 4h8v5a4 4 0 0 1-8 0z"/><path d="M8 6H5a3 3 0 0 0 3 4M16 6h3a3 3 0 0 1-3 4M12 13v4M8 20h8M9 20l1-3h4l1 3"/></symbol>
     <symbol id="i-flask" viewBox="0 0 24 24"><path d="M9 3h6M10 3v6l-5.5 9.5A2 2 0 0 0 6.2 21h11.6a2 2 0 0 0 1.7-2.5L14 9V3"/><path d="M7.5 15h9"/></symbol>
     <symbol id="i-scale" viewBox="0 0 24 24"><path d="M12 3v18M7 21h10M4 7h16"/><path d="m4 7-3 7a3 3 0 0 0 6 0zM20 7l-3 7a3 3 0 0 0 6 0z"/></symbol>
+    <symbol id="i-swap" viewBox="0 0 24 24"><path d="M7 4v13M3 13l4 4 4-4M17 20V7M13 11l4-4 4 4"/></symbol>
     <symbol id="i-logo" viewBox="0 0 24 24"><path d="M3 17 9 11l4 4 8-8"/><path d="M15 7h6v6"/></symbol>
   </svg>
   <header class="topbar">
@@ -192,6 +193,66 @@
         Spot longs only. Entry at the signal candle's close; half the position at TP1, then the stop moves to the entry;
         the rest at TP2 or at the time limit. Backtest numbers are net of fees and slippage and use only past data, but past
         results do not guarantee future ones. A setup that lost money in the backtest is never shown as a buy.
+      </div>
+    </section>
+
+    <section class="card" data-feature="futures" aria-labelledby="futures-title">
+      <div class="card-head">
+        <h2 id="futures-title"><svg class="feat-icon" aria-hidden="true"><use href="#i-swap"/></svg>Futures signals</h2>
+        <span id="futures-meta" class="muted small"></span>
+      </div>
+      <p class="muted small pad">Long <em>and</em> short trades on USDT perpetuals, found by the same 8 strategies (mirrored for
+        shorts) and proven the same way: a strategy may signal only after it made money, after futures fees and funding, on
+        both the older and the newer part of your coins' history. Every plan is sized so the stop loses your risk per trade
+        (1% by default); leverage only sets the margin, and the liquidation price is kept far beyond the stop. Analysis only:
+        you place every order yourself. Leverage magnifies mistakes, so start small.</p>
+      <div class="control-row pad-row">
+        <div class="segmented" id="futures-horizons" role="radiogroup" aria-label="Futures horizon">
+          <button type="button" role="radio" data-fhorizon="15m" aria-checked="false">15 min</button>
+          <button type="button" role="radio" data-fhorizon="1h" aria-checked="true">1 hour</button>
+          <button type="button" role="radio" data-fhorizon="4h" aria-checked="false">4 hours</button>
+          <button type="button" role="radio" data-fhorizon="1d" aria-checked="false">1 day</button>
+        </div>
+        <button id="futures-scan" type="button" class="primary">Find futures trades</button>
+        <label class="small inline-select">Max leverage
+          <select id="futures-lev" aria-label="Maximum leverage in the plans">
+            <option value="1">1x</option><option value="2">2x</option><option value="3">3x</option>
+            <option value="5">5x</option><option value="10">10x</option><option value="15">15x</option><option value="20">20x</option>
+          </select>
+        </label>
+        <span id="futures-status" class="muted small" aria-live="polite"></span>
+      </div>
+      <div class="progress inset" aria-hidden="true"><span id="futures-progress"></span></div>
+      <div id="futures-why" class="alert inset why-none" role="note" hidden></div>
+      <details id="futures-research" class="research pad" hidden>
+        <summary><strong class="small">Strategy research: 8 strategies x long and short</strong>
+          <span id="futures-research-meta" class="muted small"></span></summary>
+        <div id="futures-research-body"></div>
+      </details>
+      <div id="futures-error" class="alert inset" role="alert" hidden></div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Coin</th>
+              <th>Signal</th>
+              <th class="hide-sm">Strategy</th>
+              <th class="num">Entry</th>
+              <th class="num">Stop</th>
+              <th class="num">TP1 / TP2</th>
+              <th class="num">Leverage</th>
+              <th class="hide-sm">Why</th>
+            </tr>
+          </thead>
+          <tbody id="futures-rows">
+            <tr><td colspan="8" class="empty">Pick a horizon and press “Find futures trades”. Both directions are researched on each coin's history first.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="card-foot small muted">
+        Levels use the spot index price that the perpetual's mark price follows (the basis is shown when it is large).
+        Liquidation prices are estimates for isolated margin; a fast move or a gap can pass the stop, so never risk money you
+        cannot lose, and check the exchange's own liquidation price before you confirm an order.
       </div>
     </section>
 

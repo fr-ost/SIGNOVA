@@ -30,7 +30,7 @@ from app.analysis import scalp as sc
 from app.analysis import strategies as st
 from app.config import Settings
 from app.core.enums import SignalLabel, Timeframe
-from app.core.formatting import fmt_price
+from app.core.formatting import fmt_duration, fmt_price
 from app.core.timeutil import utcnow
 from app.data.normalization.schemas import Candle
 from app.data.validation.prices import USD_STABLE_QUOTES
@@ -295,7 +295,7 @@ class ScalpService:
     def profile(horizon: str) -> sc.ScalpProfile:
         key = (horizon or "").lower().replace("min", "m").replace("hour", "h")
         if key not in sc.PROFILES:
-            raise ValueError("horizon must be one of 15m, 1h, 4h")
+            raise ValueError("horizon must be one of 15m, 1h, 4h, 1d")
         return sc.PROFILES[key]
 
     # ------------------------------------------------------------------ control
@@ -580,10 +580,10 @@ class ScalpService:
         except Exception:
             return None
 
-    async def load_series(
-        self, asset: UniverseAsset, prof: sc.ScalpProfile, btc: list[Candle] | None, collection: Any = None
-    ) -> tuple[sc.ScalpSeries | None, list[Candle], str | None]:
-        """History for one coin and horizon: (series or None, setup candles, problem)."""
+    async def load_candles(
+        self, asset: UniverseAsset, prof: sc.ScalpProfile, collection: Any = None
+    ) -> tuple[list[Candle], list[Candle], list[Candle], str | None]:
+        """Validated setup, trend and filter candles for one coin and horizon, and a data problem if any."""
         collection = collection or await self._assets.collect(asset.symbol)
         filter_candles = collection.closed.get(prof.filter, [])
         raw_setup, _ = await self._router.history(asset.markets, prof.setup, prof.history)
@@ -596,7 +596,16 @@ class ScalpService:
             trend, _ = self._assets.validate(prof.trend, raw_trend)
         problem = None if setup_report.ok else f"{prof.setup.label} history: {setup_report.critical_issues[0]}"
         if len(setup) <= sc.WARMUP + 1 or not trend or not filter_candles:
-            return None, setup, problem or f"not enough {prof.setup.label}/{prof.trend.label}/{prof.filter.label} history"
+            problem = problem or f"not enough {prof.setup.label}/{prof.trend.label}/{prof.filter.label} history"
+        return setup, trend, filter_candles, problem
+
+    async def load_series(
+        self, asset: UniverseAsset, prof: sc.ScalpProfile, btc: list[Candle] | None, collection: Any = None
+    ) -> tuple[sc.ScalpSeries | None, list[Candle], str | None]:
+        """History for one coin and horizon: (series or None, setup candles, problem)."""
+        setup, trend, filter_candles, problem = await self.load_candles(asset, prof, collection)
+        if len(setup) <= sc.WARMUP + 1 or not trend or not filter_candles:
+            return None, setup, problem
         is_btc = asset.symbol == "BTC"
         return sc.build_series(prof, setup, trend, filter_candles, None if is_btc else btc), setup, problem
 
@@ -759,7 +768,7 @@ class ScalpService:
             suggested_allocation_pct=allocation,
             risk_at_allocation_pct=allocation * loss_pct / 100.0,
             valid_until=valid_until,
-            time_exit=f"close the rest after {hold * prof.setup.minutes} minutes ({hold} x {prof.setup.label} candles)",
+            time_exit=f"close the rest after {fmt_duration(hold * prof.setup.minutes)} ({hold} x {prof.setup.label} candles)",
             exit_rule=exit_rule,
         )
         if now > valid_until + timedelta(seconds=prof.setup.seconds) and label.rank > SignalLabel.WATCH.rank:

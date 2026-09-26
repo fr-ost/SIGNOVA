@@ -19,6 +19,12 @@ backtest decides how high a label can go). In "filter" mode, with at least MIN_F
 a veto or a strongly negative board caps a buy at WATCH, and a negative board turns STRONG BUY
 into BUY. The weights are documented priors; app.analysis.evidence_learn measures every
 factor on real outcomes and can take over as the filter once its model validates.
+
+Futures shorts (Phase 12) use the same board with side="short": every factor's direction
+flips (crowded longs, extreme greed or a critical headline now argue FOR the trade), the
+long-only vetoes do not apply, and short vetoes do: crowded shorts while open interest rises,
+a short squeeze in progress, and a major positive catalyst. The liquidation map is read from
+the short's side (short liquidations above are the squeeze risk, long liquidations below the fuel).
 """
 
 from __future__ import annotations
@@ -114,9 +120,10 @@ class Evidence:
     missing: list[str]  # factor keys without data
     vetoes: list[str]
     liq_map: dict[str, Any] | None = None
-    stop_hint: float | None = None  # a stop under the nearest estimated long-liquidation zone
+    stop_hint: float | None = None  # a stop beyond the nearest estimated liquidation zone at the stop
     notes: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    side: str = "long"  # long | short (futures): the trade this board judges
 
     @property
     def thin(self) -> bool:
@@ -162,7 +169,8 @@ class EvidenceInputs:
     symbol: str
     now: datetime
     price: float | None
-    horizon: str = "swing"  # swing | 15m | 1h | 4h
+    horizon: str = "swing"  # swing | 15m | 1h | 4h | 1d
+    side: str = "long"  # long | short (futures)
     entry: float | None = None
     stop: float | None = None
     tp1: float | None = None
@@ -281,9 +289,14 @@ class _Board:
         self.notes: list[str] = []
         self.map_data: dict[str, Any] | None = None
         self.stop_hint: float | None = None
+        self.short = i.side == "short"
 
     def add(self, key: str, group: str, direction: int, strength: float, value: str, detail: str, source: str,
-            veto: str | None = None) -> None:
+            veto: str | None = None, short_veto: str | None = None) -> None:
+        """`direction` is from a buyer's point of view; a short board flips it. `veto` blocks longs,
+        `short_veto` blocks shorts."""
+        if self.short:
+            direction, veto = -direction, short_veto
         strength = _clip(strength) if direction else 0.0
         self.factors.append(Factor(key, group, LABELS[key], direction, round(strength, 3), self.w.get(key, 0.5), value,
                                    detail, source, veto))
@@ -320,9 +333,12 @@ class _Board:
             self.add("funding", "derivatives", -1, 0.3, value, "funding above normal (0.01%)", src)
         elif f <= -0.03:
             up = (self.price_change_24h() or 0.0) >= 0
+            shorts_piling = f <= -0.05 and oi is not None and oi[1] >= 10
             self.add("funding", "derivatives", 1 if up else 0, 0.5 if up else 0.0, value,
                      "shorts pay to stay short while the price holds: fuel for a short squeeze" if up
-                     else "shorts pay to stay short in a falling market: bearish crowd, but squeeze-prone", src)
+                     else "shorts pay to stay short in a falling market: bearish crowd, but squeeze-prone", src,
+                     short_veto=(f"funding {f:+.3f}% with open interest up {oi[1]:.0f}% in 24h: crowded, leveraged shorts "
+                                 "(squeeze risk)") if shorts_piling and oi else None)
         else:
             self.add("funding", "derivatives", 0, 0.0, value, "funding normal: no crowding", src)
 
@@ -427,7 +443,14 @@ class _Board:
             else:
                 self.add("liquidations", "derivatives", 1, 0.4, value, "leveraged longs were flushed out and the selling paused: leverage reset", src)
         elif shorts >= big and shorts >= 3 * max(longs, 1.0):
-            self.add("liquidations", "derivatives", -1, 0.3, value, "a short squeeze just ran: buying after it often means chasing", src)
+            h1 = self.i.h1
+            still_rising = False
+            if len(h1) >= 4:
+                still_rising = h1[-1].close >= max(c.high for c in h1[-4:-1]) or h1[-1].close > h1[-1].open
+            hour_shorts = math.fsum(x.usd for x in last_hour if x.side == "short")
+            squeeze = hour_shorts >= big / 2 and still_rising
+            self.add("liquidations", "derivatives", -1, 0.3, value, "a short squeeze just ran: buying after it often means chasing", src,
+                     short_veto="short squeeze in progress: wait for it to end" if squeeze else None)
         else:
             self.add("liquidations", "derivatives", 0, 0.0, value, "no liquidation wave", src)
 
@@ -441,10 +464,16 @@ class _Board:
             return
         self.map_data = m.as_dict()
         price = i.price
-        if i.entry and i.stop and i.entry > i.stop:
-            r = i.entry - i.stop
-            below_lo, below_hi = i.stop - 0.75 * r, i.entry
-            above_lo, above_hi = i.entry, i.tp2 or i.entry + 2 * r
+        long_plan = bool(i.entry and i.stop and i.entry > i.stop and not self.short)
+        short_plan = bool(i.entry and i.stop and i.stop > i.entry and self.short)
+        if long_plan:
+            r = i.entry - i.stop  # type: ignore[operator]
+            below_lo, below_hi = i.stop - 0.75 * r, i.entry  # type: ignore[operator]
+            above_lo, above_hi = i.entry, i.tp2 or i.entry + 2 * r  # type: ignore[operator]
+        elif short_plan:
+            r = i.stop - i.entry  # type: ignore[operator]
+            above_lo, above_hi = i.entry, i.stop + 0.75 * r  # type: ignore[operator]
+            below_lo, below_hi = i.tp2 or i.entry - 2 * r, i.entry  # type: ignore[operator]
         else:
             span = price * max(1.0, 2.0 * (i.atr_pct or 1.5)) / 100.0
             below_lo, below_hi, above_lo, above_hi = price - span, price, price, price + span
@@ -456,30 +485,51 @@ class _Board:
         if total <= 0:
             self.add("liq_map", "derivatives", 0, 0.0, value, "no large estimated liquidation zones near the price", src)
             return
-        balance = (above - below) / total
+        balance = (above - below) / total  # a buyer's point of view (flipped for shorts in add)
         detail = ("more estimated short liquidations above than long liquidations below: the path of least resistance is up"
                   if balance > 0 else "more estimated long liquidations below than short liquidations above: downside flush risk")
         self.add("liq_map", "derivatives", 1 if balance >= 0.2 else -1 if balance <= -0.2 else 0, abs(balance), value, detail, src)
-        if i.entry and i.stop and i.entry > i.stop:
-            r = i.entry - i.stop
-            zone = [b for b in m.bands if b.long_usd > 0 and i.stop - 0.75 * r <= b.mid <= i.entry]
+        if long_plan:
+            r = i.entry - i.stop  # type: ignore[operator]
+            zone = [b for b in m.bands if b.long_usd > 0 and i.stop - 0.75 * r <= b.mid <= i.entry]  # type: ignore[operator]
             if zone:
                 band = max(zone, key=lambda b: b.long_usd)
                 if band.long_usd >= 0.25 * max(below, 1.0) and band.long_usd >= 0.05 * max(m.long_total_usd, 1.0):
-                    near_stop = band.mid <= i.stop + 0.25 * r  # a flush into this zone tags the stop
-                    if near_stop and band.low * 0.997 < i.stop:
+                    near_stop = band.mid <= i.stop + 0.25 * r  # type: ignore[operator]  # a flush into this zone tags the stop
+                    if near_stop and band.low * 0.997 < i.stop:  # type: ignore[operator]
                         self.stop_hint = band.low * 0.997
                     self.notes.append(
                         f"estimated long liquidations near {fmt_price(band.mid)} (~{_usd(band.long_usd)}): a flush there can "
                         f"run through a stop at {fmt_price(i.stop)}"
                         + (f"; a stop under {fmt_price(self.stop_hint)} clears that zone (costs more risk per coin)"
                            if self.stop_hint else ""))
-            targets = [b for b in m.bands if b.short_usd > 0 and i.entry < b.mid <= (i.tp2 or i.entry + 2 * r)]
+            targets = [b for b in m.bands if b.short_usd > 0 and i.entry < b.mid <= (i.tp2 or i.entry + 2 * r)]  # type: ignore[operator]
             if targets:
                 band = max(targets, key=lambda b: b.short_usd)
                 if band.short_usd >= 0.05 * max(m.short_total_usd, 1.0):
                     self.notes.append(f"estimated short liquidations near {fmt_price(band.mid)} (~{_usd(band.short_usd)}) "
                                       "can fuel a move toward the targets")
+        elif short_plan:
+            r = i.stop - i.entry  # type: ignore[operator]
+            zone = [b for b in m.bands if b.short_usd > 0 and i.entry <= b.mid <= i.stop + 0.75 * r]  # type: ignore[operator]
+            if zone:
+                band = max(zone, key=lambda b: b.short_usd)
+                if band.short_usd >= 0.25 * max(above, 1.0) and band.short_usd >= 0.05 * max(m.short_total_usd, 1.0):
+                    near_stop = band.mid >= i.stop - 0.25 * r  # type: ignore[operator]  # a squeeze into this zone tags the stop
+                    if near_stop and band.high * 1.003 > i.stop:  # type: ignore[operator]
+                        self.stop_hint = band.high * 1.003
+                    self.notes.append(
+                        f"estimated short liquidations near {fmt_price(band.mid)} (~{_usd(band.short_usd)}): a squeeze there can "
+                        f"run through a stop at {fmt_price(i.stop)}"
+                        + (f"; a stop above {fmt_price(self.stop_hint)} clears that zone (costs more risk per coin)"
+                           if self.stop_hint else ""))
+            low_end = i.tp2 or i.entry - 2 * r  # type: ignore[operator]
+            targets = [b for b in m.bands if b.long_usd > 0 and low_end <= b.mid < i.entry]  # type: ignore[operator]
+            if targets:
+                band = max(targets, key=lambda b: b.long_usd)
+                if band.long_usd >= 0.05 * max(m.long_total_usd, 1.0):
+                    self.notes.append(f"estimated long liquidations near {fmt_price(band.mid)} (~{_usd(band.long_usd)}) "
+                                      "can fuel a drop toward the targets")
 
     # --- order flow -------------------------------------------------------------------
 
@@ -602,7 +652,7 @@ class _Board:
             major = [t for t in catalysts if MAJOR_EXCHANGES.search(t) or re.search(r"\betf\b", t, re.IGNORECASE)]
             pick = (major or catalysts)[0]
             self.add("catalyst", "news", 1, 0.7 if major else 0.4, f"{len(catalysts)} headline(s)", f"“{pick[:160]}”",
-                     "headlines (48h)")
+                     "headlines (48h)", short_veto=f"major positive catalyst: do not short into it ({pick[:100]})" if major else None)
 
     def hype(self) -> None:
         i = self.i
@@ -756,7 +806,7 @@ def build_evidence(i: EvidenceInputs, weights: dict[str, float] | None = None) -
     return Evidence(
         version=EVIDENCE_VERSION, computed_at=i.now, symbol=i.symbol.upper(), horizon=i.horizon, score=score, grade=grade,
         factors=factors, missing=[k for k in PRIOR_WEIGHTS if k not in present], vetoes=board.vetoes,
-        liq_map=board.map_data, stop_hint=board.stop_hint, notes=board.notes, errors=errors,
+        liq_map=board.map_data, stop_hint=board.stop_hint, notes=board.notes, errors=errors, side=i.side,
     )
 
 

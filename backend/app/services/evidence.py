@@ -229,6 +229,8 @@ class EvidenceService:
         rsi: float | None = None,
         atr_pct: float | None = None,
         book_imbalance: float | None = None,
+        side: str = "long",
+        remember: bool = True,
     ) -> ev.Evidence | None:
         if self.mode == "off":
             return None
@@ -246,7 +248,7 @@ class EvidenceService:
         mentions = self._mentions[1].get(sym) if self._mentions else None
         flows, stable = self._chain(sym)
         inputs = ev.EvidenceInputs(
-            symbol=sym, now=utcnow(), price=price, horizon=horizon, entry=entry, stop=stop, tp1=tp1, tp2=tp2,
+            symbol=sym, now=utcnow(), price=price, horizon=horizon, side=side, entry=entry, stop=stop, tp1=tp1, tp2=tp2,
             h1=h1, setup=setup, d1=d1, btc_h1=[] if sym == "BTC" else await self._btc_hourly(),
             volume_24h_quote=volume_24h_quote, change_24h_pct=change_24h_pct, rsi=rsi, atr_pct=atr_pct,
             book_imbalance=book_imbalance, deriv=deriv, market_deriv=market_deriv, headlines=self._headlines(sym),
@@ -257,7 +259,8 @@ class EvidenceService:
             unlock=self._unlock(sym), exchange_flow=flows,
         )
         result = await asyncio.to_thread(ev.build_evidence, inputs)
-        self.last[(sym, horizon)] = result
+        if remember:
+            self.last[(sym, horizon)] = result
         return result
 
     def apply(self, label: Any, evidence: ev.Evidence | None, horizon: str) -> tuple[Any, list[str], str | None]:

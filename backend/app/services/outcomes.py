@@ -22,6 +22,7 @@ import logging
 import math
 import statistics
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -43,9 +44,13 @@ TRACK_TIMEFRAME = {
     "scalp_1h": Timeframe.M15,
     "scalp_4h": Timeframe.H1,
     "scalp_1d": Timeframe.H4,
+    "fut_15m": Timeframe.M5,
+    "fut_1h": Timeframe.M15,
+    "fut_4h": Timeframe.H1,
+    "fut_1d": Timeframe.H4,
 }
 SWING_MAX_HOLD_HOURS = 14 * 24
-BUY_LABELS = ("BUY", "STRONG BUY")
+BUY_LABELS = ("BUY", "STRONG BUY", "LONG", "STRONG LONG", "SHORT", "STRONG SHORT")  # spot buys and futures trades
 FILTERED = "FILTERED"  # held back by a filter; followed in its own lane
 STRATEGY_LABELS = {
     SWING_STRATEGY: "Swing (4H setup)",
@@ -53,6 +58,10 @@ STRATEGY_LABELS = {
     "scalp_1h": "Trade 1h",
     "scalp_4h": "Trade 4h",
     "scalp_1d": "Trade 1d",
+    "fut_15m": "Futures 15m",
+    "fut_1h": "Futures 1h",
+    "fut_4h": "Futures 4h",
+    "fut_1d": "Futures 1d",
 }
 
 
@@ -67,8 +76,23 @@ def _aware(value: datetime) -> datetime:
     return value if value.tzinfo else value.replace(tzinfo=UTC)
 
 
+@dataclass
+class _MirrorTarget:
+    price: float
+    allocation_pct: float | None
+
+
+def _mirror(c: Candle, k: float) -> Candle | None:
+    if c.low <= 0 or c.high <= 0 or c.open <= 0 or c.close <= 0:
+        return None
+    return replace(c, open=k / c.open, high=k / c.low, low=k / c.high, close=k / c.close)
+
+
 def default_cost_pct(strategy: str) -> float:
-    """Round-trip costs in percent: fees 0.1% per side, slippage 0.05% (swing) or 0.02% (scalp)."""
+    """Round-trip costs in percent: spot fees 0.1% per side with slippage 0.05% (swing) or 0.02% (scalp);
+    futures taker fees 0.05% per side with 0.02% slippage."""
+    if strategy.startswith("fut_"):
+        return 2.0 * (0.05 + 0.02)
     return 2.0 * (0.1 + (0.05 if strategy == SWING_STRATEGY else 0.02))
 
 
@@ -179,7 +203,20 @@ class OutcomeTracker:
         signal: Signal, targets: list[SignalTarget], candles: Sequence[Candle], cost_pct: float
     ) -> SignalOutcome | None:
         entry, stop = signal.entry_high, signal.stop_loss
-        if entry is None or stop is None or not (0 < stop < entry) or not targets:
+        quant = signal.quant_output if isinstance(signal.quant_output, dict) else {}
+        short = quant.get("side") == "short" or "SHORT" in (signal.signal or "")
+        if entry is None or stop is None or not targets:
+            return None
+        if short:  # a short is followed as a long on the mirrored chart (price -> K / price)
+            if not (0 < entry < stop):
+                return None
+            k = entry * entry
+            candles = [c for c in (_mirror(c, k) for c in candles) if c is not None]
+            entry, stop = k / entry, k / stop
+            targets = [_MirrorTarget(k / t.price, t.allocation_pct) for t in targets if t.price]
+            if quant.get("target"):
+                quant = {**quant, "target": k / quant["target"]}
+        elif not (0 < stop < entry):
             return None
         created = _aware(signal.created_at)
         start = next((k for k, c in enumerate(candles) if c.open_time >= created), None)
@@ -187,7 +224,6 @@ class OutcomeTracker:
             return None  # no candle after the signal yet
         if candles[0].open_time > created + timedelta(seconds=candles[0].timeframe.seconds):
             return None  # these candles start after the signal: cannot follow it from the start
-        quant = signal.quant_output if isinstance(signal.quant_output, dict) else {}
         trail = exit_signal = None
         breakeven = True
         if isinstance(quant.get("exit"), dict):  # a library strategy: the same exit rules as its backtest
@@ -209,10 +245,11 @@ class OutcomeTracker:
                             trail=trail, exit_signal=exit_signal)
         if res.outcome == OPEN or res.exit_time is None:
             return None
+        exit_price = (k / res.exit_price) if short and res.exit_price else res.exit_price
         return SignalOutcome(
             signal_id=signal.id,
             outcome=res.outcome,
-            exit_price=res.exit_price,
+            exit_price=exit_price,
             return_pct=round(res.return_pct, 4),
             r_multiple=round(res.r_multiple, 4),
             mfe_pct=round(res.mfe_pct, 4),
