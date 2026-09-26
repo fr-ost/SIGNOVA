@@ -411,6 +411,7 @@ label.toggle { display: inline-flex; align-items: center; gap: 6px; cursor: poin
   --f-lab: #ae3ec9;
   --f-evidence: #0d9488;
   --f-futures: #e8590c;
+  --f-analyst: #4f46e5;
   --viz-pos: #2a78d6;
   --viz-neg: #e34948;
   --shadow: 0 1px 2px rgba(15, 15, 20, 0.04), 0 10px 28px -16px rgba(15, 15, 20, 0.18);
@@ -422,7 +423,7 @@ label.toggle { display: inline-flex; align-items: center; gap: 6px; cursor: poin
   :root:not([data-theme="light"]) {
     --f-control: #4b93ec; --f-signals: #9a78f5; --f-portfolio: #2fc07e; --f-market: #27b4c1; --f-providers: #94a3b8;
     --f-chat: #8286f7; --f-watch: #e8b33a; --f-mood: #ef6b9b; --f-events: #34b3dc; --f-news: #f28544;
-    --f-scalp: #86cf3a; --f-record: #e0a84a; --f-lab: #cc5de8; --f-evidence: #2dd4bf; --f-futures: #ff8a3d; --viz-pos: #3987e5; --viz-neg: #e66767;
+    --f-scalp: #86cf3a; --f-record: #e0a84a; --f-lab: #cc5de8; --f-evidence: #2dd4bf; --f-futures: #ff8a3d; --f-analyst: #818cf8; --viz-pos: #3987e5; --viz-neg: #e66767;
     --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 12px 30px -18px rgba(0, 0, 0, 0.7);
     --shadow-hover: 0 2px 4px rgba(0, 0, 0, 0.35), 0 20px 44px -18px rgba(0, 0, 0, 0.85);
     --glow: rgba(75, 147, 236, 0.10);
@@ -431,7 +432,7 @@ label.toggle { display: inline-flex; align-items: center; gap: 6px; cursor: poin
 :root[data-theme="dark"] {
   --f-control: #4b93ec; --f-signals: #9a78f5; --f-portfolio: #2fc07e; --f-market: #27b4c1; --f-providers: #94a3b8;
   --f-chat: #8286f7; --f-watch: #e8b33a; --f-mood: #ef6b9b; --f-events: #34b3dc; --f-news: #f28544;
-  --f-scalp: #86cf3a; --f-record: #e0a84a; --f-lab: #cc5de8; --f-evidence: #2dd4bf; --f-futures: #ff8a3d; --viz-pos: #3987e5; --viz-neg: #e66767;
+  --f-scalp: #86cf3a; --f-record: #e0a84a; --f-lab: #cc5de8; --f-evidence: #2dd4bf; --f-futures: #ff8a3d; --f-analyst: #818cf8; --viz-pos: #3987e5; --viz-neg: #e66767;
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 12px 30px -18px rgba(0, 0, 0, 0.7);
   --shadow-hover: 0 2px 4px rgba(0, 0, 0, 0.35), 0 20px 44px -18px rgba(0, 0, 0, 0.85);
   --glow: rgba(75, 147, 236, 0.10);
@@ -458,7 +459,9 @@ body {
   background: linear-gradient(135deg, var(--f-control), var(--f-signals));
   box-shadow: 0 6px 16px -6px color-mix(in srgb, var(--f-signals) 70%, transparent);
 }
-.logo svg { width: 18px; height: 18px; fill: none; stroke: #ffffff; stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
+.logo svg { width: 18px; height: 18px; fill: #ffffff; stroke: none; } /* the Signova star */
+.brand .tagline { white-space: nowrap; }
+@media (max-width: 720px) { .brand .tagline { display: none; } }
 
 /* cards: feature colour, entrance, hover */
 .card, .tile {
@@ -481,6 +484,7 @@ body {
 .card[data-feature="lab"] { --feat: var(--f-lab); }
 .card[data-feature="evidence"] { --feat: var(--f-evidence); }
 .card[data-feature="futures"] { --feat: var(--f-futures); }
+.card[data-feature="analyst"] { --feat: var(--f-analyst); }
 .card[data-feature]::before {
   content: ""; position: absolute; inset: 0 0 auto 0; height: 3px;
   background: linear-gradient(90deg, var(--feat), color-mix(in srgb, var(--feat) 25%, transparent));
@@ -751,3 +755,16 @@ tr.chosen td { background: color-mix(in srgb, var(--f-lab) 8%, var(--surface)); 
 @media (max-width: 640px) { #futures-research-body table { min-width: 520px; } }
 
 .kill-banner[hidden], [hidden] { display: none !important; }
+
+/* Phase 13: Signova AI analyst */
+.ai-card { border-color: color-mix(in srgb, var(--f-analyst) 35%, var(--border)); }
+#analyst-scan { background: linear-gradient(135deg, var(--f-analyst), color-mix(in srgb, var(--f-analyst) 45%, var(--f-signals))); }
+#analyst-progress { background: linear-gradient(90deg, var(--f-analyst), var(--f-signals), var(--f-analyst)); background-size: 200% 100%; }
+[data-amarket][aria-checked="true"], [data-ahorizon][aria-checked="true"] { outline: 1px solid color-mix(in srgb, var(--f-analyst) 45%, transparent) !important; }
+.conv-bar { height: 4px; margin-top: 4px; border-radius: 4px; background: var(--surface-2); overflow: hidden; min-width: 48px; }
+.conv-bar span { display: block; height: 100%; border-radius: 4px; background: var(--muted); }
+.conv-bar .tone-good { background: var(--good); }
+.conv-bar .tone-warning { background: var(--warning); }
+.analyst-settings { flex-wrap: wrap; gap: 10px 16px; padding-top: 8px; }
+.ai-reasoning dd { font-variant-numeric: normal; }
+.ai-reasoning .kv { grid-column: 1 / -1; }

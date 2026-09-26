@@ -26,7 +26,7 @@ from app.services.settings_store import SettingsStore
 log = logging.getLogger(__name__)
 
 MAX_HEADLINES = 60
-PROMPT = """You read crypto news headlines for a spot-trading dashboard (long-only, holding hours to days).
+PROMPT = """You read crypto news headlines for Signova, a crypto trading-signal dashboard (holding hours to days).
 For each coin tagged in the headlines, judge ONLY from these headlines how the news is likely to move
 its spot price over the next 1-3 days.
 

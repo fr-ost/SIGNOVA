@@ -29,8 +29,8 @@ MAX_CONTEXT_CHARS = 24000
 EFFORTS = ("minimal", "low", "medium", "high")
 MODEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
 
-SYSTEM_PROMPT = """You are the analysis assistant of a crypto spot-trading dashboard.
-You help the user think through their next spot trade using the data in CONTEXT.
+SYSTEM_PROMPT = """You are the analysis assistant of Signova, a crypto trading-signal dashboard (spot and futures).
+You help the user think through their next trade using the data in CONTEXT.
 
 Rules:
 - Use only the numbers in CONTEXT for current prices, levels and signals. If something is
@@ -38,7 +38,8 @@ Rules:
 - The dashboard's deterministic engine is authoritative. Its labels (STRONG BUY, BUY,
   WATCH, NO TRADE), risk checks and data-integrity results cannot be overridden by you.
   Never present a NO TRADE or WATCH coin as a buy; you may explain what would need to change.
-- Spot only: no leverage, futures or short selling. You cannot place trades.
+- You cannot place trades. Spot signals are buys only; futures signals can be long or short with the
+  leverage plan shown in CONTEXT. Never suggest more leverage than the plan.
 - Be concrete: entry zone, stop, targets, reward:risk and position size come from the plan.
   Mention the main risks and the invalidation level.
 - Signals have no measured track record yet; nothing is guaranteed. Keep answers concise,
@@ -47,10 +48,11 @@ Rules:
 
 
 class ChatUnavailable(Exception):
-    def __init__(self, message: str, status_code: int = 503) -> None:
+    def __init__(self, message: str, status_code: int = 503, upstream_status: int | None = None) -> None:
         super().__init__(message)
         self.message = message
         self.status_code = status_code
+        self.upstream_status = upstream_status  # OpenAI's own HTTP status, when it answered
 
 
 class ChatService:
@@ -100,6 +102,11 @@ class ChatService:
 
     def models_for(self, preferred: str | None) -> list[str]:
         return list(dict.fromkeys([m for m in [preferred, *self._s.chat_models] if m]))
+
+    async def account_models(self) -> list[str] | None:
+        """Every model id this OpenAI key can use (None when the list is unavailable); cached for an hour."""
+        await self.available_models()
+        return self._models_cache[1] if self._models_cache else None
 
     async def available_models(self) -> dict[str, Any]:
         """The configured options, marked with what this OpenAI key can use (cached for an hour)."""
@@ -190,13 +197,55 @@ class ChatService:
     async def _complete(
         self, model: str, messages: list[dict[str, str]], effort: str | None = None, json_mode: bool = False
     ) -> tuple[str, dict[str, Any]]:
+        return await self._post(self._payload(model, messages, effort, json_mode), 120.0)
+
+    async def structured(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        *,
+        name: str,
+        schema: dict[str, Any],
+        effort: str | None,
+        max_tokens: int,
+        timeout: float,
+    ) -> tuple[str, dict[str, Any]]:
+        """A JSON answer that follows `schema` (Structured Outputs). Models without schema support get
+        plain JSON mode; a reasoning effort a model rejects is retried at its default."""
+        payload: dict[str, Any] = {
+            "model": model, "messages": messages,
+            "response_format": {"type": "json_schema", "json_schema": {"name": name, "strict": True, "schema": schema}},
+        }
+        if self.is_reasoning(model):
+            if effort:
+                payload["reasoning_effort"] = effort
+            payload["max_completion_tokens"] = max_tokens
+        else:
+            payload["max_completion_tokens"] = min(max_tokens, 8000)
+        for _ in range(3):
+            try:
+                return await self._post(payload, timeout)
+            except ChatUnavailable as exc:
+                if exc.upstream_status != 400:
+                    raise
+                text = exc.message.lower()
+                if "reasoning" in text and "reasoning_effort" in payload:
+                    payload.pop("reasoning_effort")
+                elif ("response_format" in text or "json_schema" in text or "schema" in text) \
+                        and payload["response_format"].get("type") == "json_schema":
+                    payload["response_format"] = {"type": "json_object"}
+                else:
+                    raise
+        return await self._post(payload, timeout)
+
+    async def _post(self, payload: dict[str, Any], timeout: float) -> tuple[str, dict[str, Any]]:
         assert self._s.openai_api_key is not None
         try:
             response = await self._http.post(
                 f"{self._s.openai_base_url.rstrip('/')}/chat/completions",
-                json=self._payload(model, messages, effort, json_mode),
+                json=payload,
                 headers={"Authorization": f"Bearer {self._s.openai_api_key.get_secret_value()}"},
-                timeout=httpx.Timeout(120.0, connect=10.0),
+                timeout=httpx.Timeout(timeout, connect=10.0),
             )
         except httpx.HTTPError as exc:
             raise ChatUnavailable(f"OpenAI unreachable: {type(exc).__name__}", 502) from None
@@ -213,7 +262,7 @@ class ChatService:
                 message = "OpenAI rejected the API key"
             elif response.status_code == 429:
                 message = f"OpenAI rate limit or quota: {message}"
-            raise ChatUnavailable(str(message)[:300], status)
+            raise ChatUnavailable(str(message)[:300], status, response.status_code)
         try:
             choice = body["choices"][0]
             message_obj = choice["message"]

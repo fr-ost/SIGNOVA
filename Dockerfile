@@ -1,4 +1,4 @@
-# Crypto Market Analysis & Spot Signal Dashboard
+# Signova: AI crypto signals (spot and futures)
 # Phase 1 image: FastAPI backend. The React frontend build stage is added in Phase 3
 # and served by the same service, so Railway runs a single web service + PostgreSQL.
 

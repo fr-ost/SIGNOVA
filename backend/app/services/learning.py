@@ -104,7 +104,7 @@ class LearningService:
             return self.status()
         samples: list[el.Sample] = []
         for sig, out in rows:
-            if sig.strategy.startswith("fut_"):
+            if sig.strategy.startswith(("fut_", "ai_")):
                 continue  # futures boards include shorts (flipped factors): the spot learner stays spot-only
             evidence = (sig.input_features or {}).get("evidence") if isinstance(sig.input_features, dict) else None
             if not isinstance(evidence, dict) or not isinstance(evidence.get("features"), dict):

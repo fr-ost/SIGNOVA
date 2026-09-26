@@ -1,8 +1,9 @@
-# Crypto Market Analysis & Signal Dashboard (spot and futures)
+# Signova: AI crypto signals (spot and futures)
 
-Railway-hosted market analysis and trading-signal dashboard for the CoinMarketCap Top 20
-(stablecoins excluded): spot signals, and from Phase 12 long and short signals for USDT
-perpetual futures. FastAPI, PostgreSQL, React (from Phase 3), OpenAI (from Phase 7).
+Signova is a Railway-hosted market analysis and trading-signal dashboard for the CoinMarketCap Top 20
+(stablecoins excluded). An OpenAI analyst reads every coin's full data and trades like an expert
+(Phase 13), next to measured rule engines: spot signals, and long and short signals for USDT
+perpetual futures. FastAPI, PostgreSQL, OpenAI.
 
 Analysis only: no trade execution, no exchange credentials. Futures signals are plans you place
 yourself, with leverage kept within your cap and the liquidation price far beyond the stop.
@@ -23,6 +24,7 @@ Nothing in this project promises profitability or accuracy.
 | 9 | ML / statistical prediction | **Done**: statistical trade filter, used only after it validates on newer data |
 | 10 | Evidence engine | **Done**: futures positioning, liquidations and an estimated liquidation map, order flow, news read by the AI, hype, market trend; tracks the setups it holds back and learns from outcomes |
 | 11 | Strategy library | **Done**: 8 published strategies (Turtle breakout, Connors RSI(2), Bollinger, momentum, price action, market structure...) with their own exits, walk-forward research on every scan, 1-day horizon, "why no buy" |
+| 13 | Signova AI analyst | **Done**: renamed to Signova; OpenAI's best model reads each coin's full data (multi-timeframe charts, structure, futures positioning, liquidations, flow, news, market, the rule engines' research) and decides long / short / no trade with an exact plan; an independent risk-manager pass can only lower it; plans are checked, sized, stored and tracked (limit and stop orders count once filled) |
 | 12 | Futures signals | **Done**: long and short trades on USDT perpetuals, every strategy researched for each side with futures costs, side-aware evidence board, leverage plan with the liquidation price beyond the stop, shorts in the track record |
 
 ## Decision hierarchy
@@ -321,6 +323,63 @@ often where the edge is.
 Trailing and indicator exits are followed the same way by the track record (the exit rule is
 stored with each signal), and the plan tells you how to manage the trade ("trail: stop at the
 lowest low of the last 20 candles, raise it after each candle").
+
+## Signova AI analyst (Phase 13)
+
+The **Signova AI analyst** card (top of the page) asks an OpenAI model to analyse each selected coin
+the way an experienced discretionary trader would, instead of relying on fixed equations. Choose the
+market (futures: long or short; spot: buy or no trade), the horizon (15 minutes to 1 day) and press
+**Analyze with AI**. It takes about a minute per coin (high reasoning effort) and uses your
+`OPENAI_API_KEY` credits; nothing runs on its own.
+
+**What the AI reads** (one JSON dossier per coin, about 15-25k tokens):
+- 2-4 timeframes of candles (up to 90 per timeframe, with the taker-buy share of volume), and for each:
+  EMAs, RSI, MACD, ATR, Bollinger bands, ADX, volume ratios, the regime, swing highs and lows, the last
+  structure break, and support and resistance with their touches;
+- price, 24h change and volume, spread, order-book depth and imbalance, perpetual mark and basis;
+- futures positioning: funding (now, 7-day average), open interest changes (1h to 72h), crowd and
+  top-trader long/short ratios, taker flow, liquidations (1h, 4h, 24h, largest) and the estimated
+  liquidation map;
+- every evidence-board factor (flow, relative strength, news, hype, unlocks...);
+- the coin's headlines with the AI news reading, sentiment, scheduled unlocks, market headlines;
+- the market backdrop (Bitcoin trend and RSI, breadth, fear & greed, market-wide funding, altcoin
+  season) and Bitcoin's own 4H and 1D charts;
+- what the rule engines see on this coin and their measured walk-forward research (the futures
+  engine runs first when its result is older than 90 minutes).
+
+**How it decides:** the prompt describes a top-down professional process (market, higher timeframe,
+setup, positioning and liquidity, news, the measured research), strict discipline (no trade is the
+usual answer; conviction 80+ only when everything agrees) and a plan with a stop beyond the level that
+proves the idea wrong. The answer is enforced by a JSON schema (OpenAI Structured Outputs): decision,
+conviction, order type (market, limit or stop), entry, stop, two targets, holding time, the estimated
+chance of TP1 before the stop, and its reasoning per topic.
+
+**Second opinion:** every proposed trade goes back to the model as an independent risk manager that
+looks for what is wrong (counter-trend, chasing, stop in noise or in front of a liquidation cluster,
+targets beyond major levels, positioning or news against it). It can approve, reduce the conviction or
+reject; it can never raise a trade.
+
+**Checks (not opinions):** Signova never invents or flips a trade. It only verifies that the plan can be
+executed and is worth it: stop and targets on the right sides, entry reachable (a limit or stop order
+within 3 ATR), stop at least 2.5x the round-trip costs and 0.3 ATR, not wider than the horizon allows,
+net reward:risk at least 1.5 after costs, conviction at least your minimum (60). A plan that fails is
+shown as WATCH with the reason. Futures plans get the leverage plan of Phase 12 (size from your risk per
+trade, liquidation beyond the stop); spot plans a portfolio allocation.
+
+**The model:** "auto" uses the best GPT model your key can use (the newest `gpt-N.M` flagship, for
+example gpt-5.1 before gpt-5; then o3, GPT-4.1) and falls back to the next one if a model is
+unavailable. You can pick any model your key lists, the thinking effort, the minimum conviction and
+whether the risk manager runs, in **AI settings**.
+
+**Measured, not trusted:** every AI trade is stored (`ai_futures_4h`, `ai_spot_1h`...) and followed by
+the Track record like every other signal. Market orders start at once; limit and stop orders count
+only once the price fills them (an order that expires or whose move leaves without it is marked
+NOFILL and not counted). After a few weeks the Track record shows whether the AI beats the rule
+engines on your coins. An LLM can be wrong with confidence: size small until it has a record.
+
+`POST /api/ai/analyst/scan?market=futures&horizon=4h` (token), `GET /api/ai/analyst?market=futures&horizon=4h`,
+`POST /api/ai/analyst/coin` (`{"symbol": "ETH", "market": "futures", "horizon": "4h"}`, token),
+`GET/PUT /api/ai/analyst/settings`, `GET /api/ai/analyst/models` (token).
 
 ## Futures signals (Phase 12)
 
@@ -718,6 +777,9 @@ Without `ADMIN_TOKEN`, anyone who finds the URL can use those controls.
 | `POST /api/scalp/scan?horizon=15m\|1h\|4h` (token) | Scalp scan of the selected coins, in the background |
 | `GET /api/scalp?horizon=1h` | Latest scalp scan (signals, per-coin backtest, pooled record) and scan status |
 | `GET /api/scalp/{symbol}?horizon=1h` (token) | Scalp analysis of one coin now |
+| `POST /api/ai/analyst/scan?market=spot\|futures&horizon=4h` (token) | Phase 13: the AI analyst analyses the selected coins (background, about a minute per coin) |
+| `GET /api/ai/analyst?market=futures&horizon=4h` | Phase 13: latest AI analysis (decisions, plans, reasoning, risk-manager verdicts, token usage) |
+| `POST /api/ai/analyst/coin`, `GET/PUT /api/ai/analyst/settings`, `GET /api/ai/analyst/models` | Phase 13: one coin now (token), settings (PUT: token), the models your key can use (token) |
 | `POST /api/futures/scan?horizon=15m\|1h\|4h\|1d` (token) | Phase 12: futures scan (long and short) of the selected coins, in the background |
 | `GET /api/futures?horizon=4h` | Phase 12: latest futures scan (signals with leverage plans, research for both sides) and scan status |
 | `GET/PUT /api/futures/settings` (PUT: token) | Phase 12: leverage cap, futures fee, slippage, maintenance margin |
@@ -811,6 +873,8 @@ Portfolio > Risk settings, which are stored in the database and take precedence.
 | `SCALP_SLIPPAGE_PCT` / `SCALP_MIN_RISK_COST_MULTIPLE` / `SCALP_MIN_TRADES` | 0.02 / 2.5 / 15 | scalp costs, fee filter, evidence minimum |
 | `FUTURES_ENABLED` / `FUTURES_MAX_LEVERAGE` | true / 5 | Phase 12 futures signals, leverage cap for the plans (1-20) |
 | `FUTURES_FEE_PCT` / `FUTURES_SLIPPAGE_PCT` / `FUTURES_MAINTENANCE_MARGIN_PCT` | 0.05 / 0.02 / 1.0 | futures costs per side, maintenance margin for the liquidation estimate |
+| `AI_ANALYST_MODEL` / `AI_ANALYST_EFFORT` | auto / high | Phase 13 model (auto = best on your key) and reasoning effort |
+| `AI_ANALYST_REVIEW` / `AI_ANALYST_MIN_CONVICTION` / `AI_ANALYST_MIN_REWARD_RISK` / `AI_ANALYST_CONCURRENCY` | true / 60 / 1.5 / 2 | risk-manager pass, plan checks, coins analysed at once |
 | `REGIME_CACHE_SECONDS` | 600 | market regime refresh |
 | `CANDLE_FETCH_LIMIT` / `CANDLE_FETCH_LIMIT_LONG` | 500 / 1000 | candles per request (5m-1H / 4H-1D) |
 | `SIGNAL_PERSIST_ENABLED` / `FEATURE_PERSIST_TIMEFRAMES` | true / 1h,4h,1d | history storage |
@@ -864,6 +928,12 @@ Phase 11: trailing and exit-signal simulation, gap fills, every library strategy
 data, one-trade-at-a-time backtests, the research gates (both parts, trade counts, luck), verdicts,
 a validated strategy producing a BUY with its exit rule stored and followed by the track record,
 "why no buy", and the 1-day horizon.
+Phase 13: best-model choice from the key's model list, defensive parsing of the model's answer,
+every plan check (spot cannot short, stop too tight, reward too small, low conviction, price past the
+stop, limit orders), the risk manager only lowering, limit and stop entries counting once filled
+(NOFILL otherwise), and a full scan against a fake OpenAI that answers from the dossier: the dossier's
+content, Structured Outputs and reasoning effort in the request, storage without duplicates, a tracked
+win, settings, the model list, the emergency stop and a missing key.
 Phase 12: the candle mirror (a downtrend becomes an uptrend), shorts found in a falling market and
 longs in a rising one, the side-aware evidence board and short liquidation zones, leverage plans
 (liquidation beyond the stop, size from the risk per trade), a validated short becoming a SHORT
@@ -917,6 +987,8 @@ Phase 7: `services/ai_review.py`;
 Phase 8: `analysis/lab.py` (variant grid, walk-forward split, statistics), `services/lab.py`;
 Phase 9: `analysis/ml.py` (logistic regression and its validation);
 Phase 11: `analysis/strategies.py` (strategy library, exits, research, verdicts);
+Phase 13: `analysis/ai_analyst.py` (dossier, prompts, JSON schemas, parsing, plan checks),
+`services/ai_analyst.py` (AI scans, model choice, risk-manager pass, sizing, storage);
 Phase 12: `analysis/futures.py` (candle mirror, short rules, leverage and liquidation plan),
 `services/futures.py` (futures scan, research for both sides, judging, storage);
 Phase 10: `data/derivatives.py` (exchange parsers), `services/derivatives.py` (failover, cache),

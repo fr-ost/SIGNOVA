@@ -382,8 +382,8 @@ class CandlesOut(_Model):
 # ---------------------------------------------------------------------- Phase 2: analysis and signals
 
 DISCLAIMER = (
-    "Deterministic quantitative analysis of public market data. Not financial advice and no promise "
-    "of accuracy or profit. Spot only: you decide and place every trade yourself."
+    "Signova: quantitative and AI analysis of public market data. Not financial advice and no promise "
+    "of accuracy or profit. No trade execution: you decide and place every trade yourself."
 )
 
 

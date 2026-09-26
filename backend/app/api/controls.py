@@ -54,6 +54,7 @@ def full_status(c: Container) -> dict[str, Any]:
         "watchlist": c.watchlist.symbols(),
         "emergency_stop": c.kill.status(),
         "futures": c.futures.status(),
+        "analyst": c.analyst.status(),
     }
 
 
@@ -361,6 +362,84 @@ async def futures_settings(c: ContainerDep) -> dict[str, Any]:
 async def futures_settings_update(body: FuturesSettingsIn, c: ContainerDep, _: Admin) -> dict[str, Any]:
     """Leverage cap, fees, slippage and maintenance margin used by the futures plans."""
     return await c.futures.update(**body.model_dump())
+
+
+# ----------------------------------------------------------------------------- Signova AI analyst (phase 13)
+
+MarketQuery = Annotated[str, Query(pattern=r"^(spot|futures)$")]
+
+
+class AnalystSettingsIn(BaseModel):
+    model: str | None = Field(default=None, min_length=1, max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
+    effort: str | None = Field(default=None, pattern=r"^(low|medium|high)$")
+    review: bool | None = None
+    min_conviction: int | None = Field(default=None, ge=40, le=90)
+    use_quant: bool | None = None
+
+
+class AnalystCoinIn(BaseModel):
+    symbol: str = Field(min_length=1, max_length=15, pattern=r"^[A-Za-z0-9]+$")
+    market: str = Field(default="futures", pattern=r"^(spot|futures)$")
+    horizon: str = Field(default="4h", pattern=r"^(15m|1h|4h|1d)$")
+
+
+def _analyst_ready(c: Container) -> None:
+    if c.kill.active:
+        raise HTTPException(status_code=503, detail="emergency stop is engaged")
+    if not c.analyst.configured:
+        raise HTTPException(status_code=503, detail="OPENAI_API_KEY is not set on the server")
+
+
+@router.post("/api/ai/analyst/scan", tags=["ai"])
+async def analyst_scan(c: ContainerDep, _: Admin, market: MarketQuery = "futures", horizon: HorizonQuery = "4h") -> dict[str, Any]:
+    """The AI analyst reads every selected coin's full data and decides (in the background; minutes)."""
+    _analyst_ready(c)
+    started = c.analyst.start_scan(market, horizon)
+    return {"started": started, "status": c.analyst.status()}
+
+
+@router.get("/api/ai/analyst", tags=["ai"])
+async def analyst_view(c: ContainerDep, market: MarketQuery = "futures", horizon: HorizonQuery = "4h") -> dict[str, Any]:
+    """The latest AI analyst scan for a market and horizon (never starts one)."""
+    return {"result": c.analyst.results.get(f"{market}:{horizon}"), "status": c.analyst.status(),
+            "settings": c.analyst.settings()}
+
+
+@router.post("/api/ai/analyst/coin", tags=["ai"])
+async def analyst_coin(body: AnalystCoinIn, c: ContainerDep, _: Admin) -> dict[str, Any]:
+    """Analyse one coin now (waits for the answer: often one to three minutes)."""
+    _analyst_ready(c)
+    universe = await c.universe.get()
+    asset = universe.find(body.symbol.upper())
+    if asset is None or not asset.supported:
+        raise HTTPException(status_code=404, detail=f"{body.symbol.upper()} is not in the analysed universe")
+    try:
+        result = await c.analyst.analyze(asset, body.market, body.horizon)
+    except ChatUnavailable as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from None
+    scan = c.analyst.results.get(f"{body.market}:{body.horizon}")
+    if scan is not None:
+        scan["signals"] = [result if s["symbol"] == result["symbol"] else s for s in scan["signals"]]
+    return result
+
+
+@router.get("/api/ai/analyst/settings", tags=["ai"])
+async def analyst_settings(c: ContainerDep) -> dict[str, Any]:
+    return c.analyst.settings()
+
+
+@router.put("/api/ai/analyst/settings", tags=["ai"])
+async def analyst_settings_update(body: AnalystSettingsIn, c: ContainerDep, _: Admin) -> dict[str, Any]:
+    return await c.analyst.update(**body.model_dump())
+
+
+@router.get("/api/ai/analyst/models", tags=["ai"])
+async def analyst_models(c: ContainerDep, _: Admin) -> dict[str, Any]:
+    """The models this OpenAI key can use and the order a scan tries them (best first)."""
+    if not c.analyst.configured:
+        return {"configured": False, "order": [], "account": None}
+    return {"configured": True, "order": await c.analyst.models(), "account": await c.chat.account_models(),
+            "choice": c.analyst.model}
 
 
 # ----------------------------------------------------------------------------- AI review (phase 7)
