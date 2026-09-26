@@ -1543,7 +1543,7 @@
     const valid = rows.filter((r) => r.validated).length;
     $("scalp-research-meta").textContent = ` · ${valid} of ${rows.length} validated on these coins`;
     const cell = (sp) => (sp && sp.trades ? [fmtR(sp.expectancy_r), h("div", { class: "muted small", text: `${sp.trades} tr · ${Math.round(sp.win_rate ?? 0)}%` })] : [DASH]);
-    const sorted = rows.slice().sort((a, b) => (b.validated - a.validated) || ((b.all.expectancy_r ?? -9) - (a.all.expectancy_r ?? -9)));
+    const sorted = rows; // the server orders them: validated, then enough trades to judge, then closest to enough
     $("scalp-research-body").replaceChildren(
       table([["Strategy"], ["Older 70%", "num"], ["Newer 30%", "num"], ["All", "num hide-sm"], ["Exit", "hide-sm"], ["Verdict"]],
         sorted.map((r) => h("tr", { class: r.validated ? "chosen" : null },
@@ -2250,7 +2250,7 @@
   function futuresResearchTable(rows) {
     const cell = (sp) => (sp && sp.trades ? [fmtR(sp.expectancy_r), h("div", { class: "muted small", text: `${sp.trades} tr · ${Math.round(sp.win_rate ?? 0)}%` })] : [DASH]);
     const cls = (v) => `num ${v > 0 ? "pnl-up" : v < 0 ? "pnl-down" : ""}`;
-    const sorted = rows.slice().sort((a, b) => (b.validated - a.validated) || ((b.all.expectancy_r ?? -9) - (a.all.expectancy_r ?? -9)));
+    const sorted = rows; // the server orders them: validated, then enough trades to judge, then closest to enough
     return table([["Strategy"], ["Side"], ["Older 70%", "num"], ["Newer 30%", "num"], ["All", "num hide-sm"], ["Verdict"]],
       sorted.map((r) => h("tr", { class: r.validated ? "chosen" : null },
         h("td", { title: r.source }, h("strong", { class: "small", text: r.name }), h("div", { class: "muted small rule-text", text: r.rule })),

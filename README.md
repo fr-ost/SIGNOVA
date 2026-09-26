@@ -313,8 +313,10 @@ strategies fire on one coin, the best-validated one is shown ("+1 more" lists th
 held back and why (price already ran, lost on this coin, a filter), or that nothing made money
 at this horizon, and what to try: another horizon, more coins (a bigger sample validates sooner),
 or lower fees. The **Strategy research** table shows every strategy's result on the older and
-newer data. The **1-day horizon** (4H candles, 1D trend, up to 2 days per trade) pays much less
-in fees relative to the move, which is often where the edge is.
+newer data: validated strategies first, then those with enough trades to judge, then the ones
+closest to enough trades (a few lucky trades never top the table). The **1-day horizon** (4H
+candles, 1D trend, up to 2 days per trade) pays much less in fees relative to the move, which is
+often where the edge is.
 
 Trailing and indicator exits are followed the same way by the track record (the exit rule is
 stored with each signal), and the plan tells you how to manage the trade ("trail: stop at the

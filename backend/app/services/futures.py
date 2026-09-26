@@ -241,7 +241,7 @@ class FuturesService:
                 "filter_timeframe": prof.filter.label, "generated_at": utcnow(), "engine_version": FUTURES_VERSION,
                 "cost_pct": p.cost_pct, "settings": self.settings(),
                 "research": [_clean(r.as_dict() | {"side": side}) for (side, _), r in sorted(
-                    research.items(), key=lambda kv: (kv[0][0], list(st.STRATEGIES).index(kv[0][1])))],
+                    research.items(), key=lambda kv: st.research_order(kv[1]))],
                 "counts": {
                     "LONG": sum(1 for r in results if r["side"] == "long" and r["signal"] in ("BUY", "STRONG BUY")),
                     "SHORT": sum(1 for r in results if r["side"] == "short" and r["signal"] in ("BUY", "STRONG BUY")),
@@ -566,7 +566,8 @@ class FuturesService:
         valid = [f"{r.name} ({side})" for (side, _), r in research.items() if r.validated]
         fired = [r for r in results if r.get("plan")]
         if not valid:
-            promising = [f"{r.name} ({side}, {r.all.expectancy_r:+.2f}R over {r.all.trades})" for (side, _), r in research.items()
+            promising = [f"{r.name} ({side}, {r.all.expectancy_r:+.2f}R over {r.all.trades})"
+                         for (side, _), r in sorted(research.items(), key=lambda kv: st.research_order(kv[1]))
                          if (r.train.expectancy_r or 0) > 0 and (r.test.expectancy_r or 0) > 0 and r.reasons[0].startswith("only")]
             if promising:
                 text = (f"Promising but not proven yet: {', '.join(promising[:3])}. Select more coins so the research has "

@@ -406,7 +406,7 @@ class ScalpService:
                 "variant": self.variant_info.get(prof.key, {"label": "published rules", "source": "default"}),
                 "model": self._model_summary(prof.key),
                 "pooled": stats_out(pooled),
-                "research": [_clean(r.as_dict()) for r in self._research[prof.key].values()],
+                "research": [_clean(r.as_dict()) for r in sorted(self._research[prof.key].values(), key=st.research_order)],
                 "no_buy_reason": self._no_buy_reason(prof.key, results),
                 "counts": {label.value: sum(1 for r in results if r.signal == label) for label in SignalLabel},
                 "signals": [self.result_out(r) for r in results],
@@ -450,8 +450,8 @@ class ScalpService:
         valid = [r for r in research.values() if r.validated]
         fired = [r for r in results if r.plan is not None]
         if not valid:
-            promising = [r for r in research.values() if (r.all.expectancy_r or 0) > 0 and (r.train.expectancy_r or 0) > 0
-                         and (r.test.expectancy_r or 0) > 0 and r.reasons[0].startswith("only")]
+            promising = [r for r in sorted(research.values(), key=st.research_order) if (r.all.expectancy_r or 0) > 0
+                         and (r.train.expectancy_r or 0) > 0 and (r.test.expectancy_r or 0) > 0 and r.reasons[0].startswith("only")]
             if promising:
                 names = ", ".join(f"{r.name} ({r.all.expectancy_r:+.2f}R over {r.all.trades} trades)" for r in promising[:3])
                 text = (f"Promising but not proven yet: {names}. They made money on both parts of the history, but on too "

@@ -67,6 +67,22 @@ def test_shorts_are_found_in_a_downtrend_and_longs_in_an_uptrend():
 # ----------------------------------------------------------------------------- leverage
 
 
+def test_research_table_puts_evidence_before_a_few_lucky_trades():
+    def row(key, train, test, mean, validated=False):
+        def split(n):
+            return st.Split(n, 50.0, mean, None, n * mean)
+
+        return st.Research(key, key, "", "", "", "", 5, split(train), split(test), split(train + test), None, validated)
+
+    lucky = row("lucky", 3, 6, 1.2)  # +1.2R over 9 trades: not evidence
+    close = row("close", 58, 24, 0.1)  # nearly enough trades to judge
+    judged = row("judged", 70, 28, 0.02)
+    losing = row("losing", 90, 30, -0.1)
+    proven = row("proven", 80, 30, 0.2, validated=True)
+    order = [r.key for r in sorted([lucky, losing, close, judged, proven], key=st.research_order)]
+    assert order == ["proven", "judged", "losing", "close", "lucky"]
+
+
 def test_leverage_plan_keeps_liquidation_far_beyond_the_stop():
     plan = fu.leverage_plan("long", 100.0, 98.0, cost_pct=0.14, funding_rate_pct_8h=0.01, hold_hours=8,
                             risk_pct_equity=1.0, max_leverage=20, mmr_pct=1.0, equity=1000.0)
