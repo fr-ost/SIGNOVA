@@ -374,6 +374,7 @@
       `Ranking: ${u.listing_source}${access}${u.fallback_used ? ", fallback" : ""}${u.stale ? ", STALE" : ""} · ${counts}`;
 
     setChatSymbols(m.assets.filter((a) => a.supported).map((a) => a.symbol));
+    setAnalystTokens(m.assets.filter((a) => a.supported).map((a) => a.symbol));
     const rows = m.assets.map(marketRow);
     $("market-rows").replaceChildren(
       ...(rows.length ? rows : [h("tr", {}, h("td", { colspan: 10, class: "empty", text: "No assets in the universe." }))]),
@@ -1106,7 +1107,7 @@
     applyEmergency(s.emergency_stop);
     const scalpRunning = (s.scalp && Object.values(s.scalp).some((x) => x.running)) || (s.lab && Object.values(s.lab).some((x) => x.running))
       || (s.futures && Object.values(s.futures).some((x) => x.running))
-      || (s.analyst && Object.values(s.analyst).some((x) => x.running));
+      || (s.analyst && s.analyst.running);
     scheduleControl(s.scan.running || scalpRunning ? 2000 : 30000);
     if (s.live.running && !liveTimer) liveTimer = setInterval(refreshLive, 5000);
     if (!s.live.running && liveTimer) {
@@ -2460,173 +2461,157 @@
     }
   }
 
-  // ---------------------------------------------------------------- Signova AI analyst (phase 13)
+  // ---------------------------------------------------------------- Signova AI analyst: single token (phase 13)
 
-  let analystMarket = "futures";
+  let analystToken = "BTC";
   let analystHorizon = "4h";
   let lastAnalyst = null;
-  const analystOpen = new Set();
-  const analystSeen = {};
-  const analystKey = () => `${analystMarket}:${analystHorizon}`;
+  let analystSeen = undefined;
   const ORDER_TEXT = { market: "market order now", limit: "limit order at the level", stop: "stop order on the break" };
 
-  function analystBadge(sig) {
-    const tone = isTrade(sig) ? "good" : sig.signal === "WATCH" ? "warning" : "neutral";
-    return toneBadge(tone, humanize(sig.label));
+  function setAnalystTokens(symbols) {
+    const select = $("analyst-token");
+    const current = select.value || pref("analystToken") || analystToken;
+    const list = [...new Set(symbols)];
+    if (!list.length) return;
+    select.replaceChildren(...list.map((sym) => h("option", { value: sym, text: sym })));
+    select.value = list.includes(current) ? current : list[0];
+    if (select.value !== analystToken) {
+      analystToken = select.value;
+      refreshAnalyst();
+    }
   }
 
-  function convictionCell(value) {
-    if (value == null) return [DASH];
+  function convictionBar(value) {
+    if (value == null) return null;
     const tone = value >= 75 ? "good" : value >= 60 ? "warning" : "neutral";
     const fill = h("span", { class: `tone-${tone}` });
     fill.style.width = `${Math.max(4, Math.min(100, value))}%`; // CSSOM: allowed by the page's strict CSP
-    return [h("strong", { text: String(value) }), h("div", { class: "conv-bar" }, fill)];
+    return h("div", { class: "conv-bar" }, fill);
   }
 
-  function analystDetail(sig) {
-    const a = sig.analysis || {};
-    const p = sig.plan;
-    const parts = [];
-    const again = h("button", { type: "button", class: "small", text: "Analyse this coin again",
-      title: "Run a fresh AI analysis of this coin now (about a minute; uses OpenAI credits)" });
-    again.addEventListener("click", (e) => { e.stopPropagation(); analyseCoin(sig.symbol, again); });
-    parts.push(h("div", { class: "pad review-row" }, again));
-    if (a.thesis) {
-      parts.push(h("div", { class: "pad strategy-box" },
-        h("strong", { class: "small" }, a.setup ? `${a.setup} ` : "AI view ", sideChip(sig.side)),
-        h("p", { class: "small", text: a.thesis }),
-        h("p", { class: "muted small", text: [
-          `conviction ${sig.conviction ?? DASH}/100${sig.analyst_conviction != null && sig.analyst_conviction !== sig.conviction ? ` (analyst ${sig.analyst_conviction})` : ""}`,
-          sig.probability != null ? `estimated chance of TP1 before the stop ${Math.round(sig.probability * 100)}%` : null,
-          a.bias ? `bias ${a.bias}` : null].filter(Boolean).join(" · ") })));
-    }
-    if (p) {
-      const lev = sig.leverage;
-      const size = sig.sizing;
-      const usd = (v) => (v == null ? "" : ` (${fmtUsd(v)})`);
-      parts.push(h("dl", { class: "detail-grid compact" },
-        kv("Direction", sideChip(p.side)),
+  function marketPanel(res, m) {
+    const x = res[m] || {};
+    const p = x.plan;
+    const lev = x.leverage;
+    const size = x.sizing;
+    const usd = (v) => (v == null ? "" : ` (${fmtUsd(v)})`);
+    const tone = isTrade(x) ? "good" : x.signal === "WATCH" ? "warning" : "neutral";
+    return h("div", { class: `market-panel ${isTrade(x) ? "is-trade" : ""}` },
+      h("div", { class: "market-panel-head" },
+        h("span", { class: "muted small", text: m === "spot" ? "Spot" : "Futures (USDT perpetual)" }),
+        h("div", { class: "fut-signal" }, m === "futures" ? sideChip(x.side) : null, toneBadge(tone, humanize(x.label)))),
+      p && isTrade(x) ? h("dl", { class: "detail-grid compact" },
         kv("Order", `${ORDER_TEXT[p.entry_type] || p.entry_type}: ${fmtPrice(p.entry)}`),
-        kv("Entry zone", `${fmtPrice(p.entry_low)} to ${fmtPrice(p.entry_high)}`),
         kv("Stop", `${fmtPrice(p.stop)} (${p.side === "long" ? "−" : "+"}${p.risk_pct.toFixed(2)}%)`),
         kv("Targets", `${fmtPrice(p.tp1)}${p.tp2 != null ? ` · ${fmtPrice(p.tp2)}` : ""}`),
-        kv("Net R:R", `${p.reward_risk_tp1.toFixed(2)} at TP1 · ${p.reward_risk_final.toFixed(2)} at the final target`),
-        lev ? kv("Leverage", `${lev.leverage}x isolated · margin ${lev.margin_pct_of_equity.toFixed(1)}% of equity${usd(lev.margin_usd)}`) : null,
-        lev ? kv("Position size", `${lev.notional_pct_of_equity.toFixed(0)}% of equity${usd(lev.notional_usd)}`) : null,
+        kv("Net R:R", `${p.reward_risk_tp1.toFixed(2)} · ${p.reward_risk_final.toFixed(2)}`),
+        lev ? kv("Leverage", `${lev.leverage}x isolated · margin ${lev.margin_pct_of_equity.toFixed(1)}%${usd(lev.margin_usd)}`) : null,
         lev ? kv("Liquidation (est.)", `${fmtPrice(lev.liquidation_price)} · ${lev.liquidation_distance_pct.toFixed(1)}% away`) : null,
-        size ? kv("Position size", `${size.allocation_pct.toFixed(1)}% of portfolio${usd(size.allocation_usd)} · risks ${size.risk_pct.toFixed(2)}%`) : null,
-        kv("Costs", `${p.cost_pct.toFixed(2)}% round trip`),
+        lev ? kv("Position", `${lev.notional_pct_of_equity.toFixed(0)}% of equity${usd(lev.notional_usd)}`) : null,
+        size ? kv("Position", `${size.allocation_pct.toFixed(1)}% of portfolio${usd(size.allocation_usd)} · risks ${size.risk_pct.toFixed(2)}%`) : null,
+        kv("Costs", `${x.cost_pct.toFixed(2)}% round trip`),
         p.entry_valid_until ? kv("Order valid until", fmtTime(p.entry_valid_until)) : null,
-        kv("Close by", `${fmtTime(p.exit_until)} (about ${Math.round(p.hold_hours)} h in the trade)`),
-        a.invalidation ? kv("Invalidation", a.invalidation, "wide") : null));
-    }
-    if (sig.notes && sig.notes.length) parts.push(h("div", { class: "pad" }, h("strong", { class: "small", text: isTrade(sig) ? "Checks" : "Why not a trade" }), plainList(sig.notes, "small")));
-    const sections = [["Market", a.market_context], ["Trend and structure", a.trend_and_structure], ["Key levels", a.key_levels],
-      ["Positioning and flow", a.positioning_and_flow], ["News and catalysts", a.news_and_catalysts]].filter(([, t]) => t);
-    if (sections.length) {
-      parts.push(h("dl", { class: "detail-grid compact ai-reasoning" }, ...sections.map(([k, t]) => kv(k, t))));
-    }
-    const lists = [["For the trade", a.confluences], ["Risks", a.risks], ["Watch", a.what_to_watch]].filter(([, l]) => l && l.length);
-    for (const [title, items] of lists) parts.push(h("div", { class: "pad" }, h("strong", { class: "small", text: title }), plainList(items, "small")));
-    if (sig.review) {
-      const r = sig.review;
-      const tone = { approve: "good", reduce: "warning", reject: "critical" }[r.verdict] || "neutral";
-      parts.push(h("div", { class: "pad ai-review" }, h("strong", { class: "small" }, "Risk manager ", toneBadge(tone, humanize(r.verdict))),
-        h("p", { class: "small", text: r.summary }), r.issues && r.issues.length ? plainList(r.issues, "small") : null));
-    }
-    const u = sig.usage || {};
-    parts.push(h("p", { class: "muted small pad", text: [sig.model ? `model ${sig.model}` : null, sig.seconds != null ? `${sig.seconds}s` : null,
-      u.calls ? `${u.calls} call${u.calls > 1 ? "s" : ""}, ${(u.prompt_tokens || 0).toLocaleString()} input + ${(u.completion_tokens || 0).toLocaleString()} output tokens` : null,
-      sig.error ? `error: ${sig.error}` : null].filter(Boolean).join(" · ") }));
-    return parts;
-  }
-
-  function analystRows(sig) {
-    const open = analystOpen.has(sig.symbol);
-    const toggle = () => {
-      if (analystOpen.has(sig.symbol)) analystOpen.delete(sig.symbol); else analystOpen.add(sig.symbol);
-      renderAnalyst(lastAnalyst);
-    };
-    const p = sig.plan;
-    const cls = isTrade(sig) ? "num" : "num muted";
-    const level = (value, sub) => (value == null ? [DASH] : [fmtPrice(value), sub ? h("div", { class: "muted small", text: sub }) : null]);
-    const size = sig.leverage ? [`${sig.leverage.leverage}x`, h("div", { class: "muted small", text: `liq ${fmtPrice(sig.leverage.liquidation_price)}` })]
-      : sig.sizing ? [`${sig.sizing.allocation_pct.toFixed(1)}%`, h("div", { class: "muted small", text: "of portfolio" })] : [DASH];
-    const thesis = (sig.analysis && (sig.analysis.thesis || sig.analysis.no_trade_reason)) || (sig.notes || [])[0] || "";
-    const row = h(
-      "tr",
-      { class: `clickable${open ? " open" : ""}`, onclick: toggle, "aria-expanded": open ? "true" : "false" },
-      h("td", {}, h("div", { class: "asset-cell" }, h("strong", { text: sig.symbol }), h("span", { class: "muted small", text: sig.name }))),
-      h("td", {}, h("div", { class: "fut-signal" }, sig.market === "futures" ? sideChip(sig.side) : null, analystBadge(sig)),
-        p && p.entry_type !== "market" && isTrade(sig) ? h("div", { class: "muted small status-line", text: `${p.entry_type} order: wait for ${fmtPrice(p.entry)}` }) : null,
-        sig.review ? h("div", { class: "muted small", text: `risk manager: ${sig.review.verdict}` }) : null),
-      h("td", { class: "num" }, ...convictionCell(sig.conviction)),
-      h("td", { class: cls }, ...(p ? level(p.entry, p.entry_type) : [DASH])),
-      h("td", { class: cls }, ...(p ? level(p.stop, `${p.side === "long" ? "−" : "+"}${p.risk_pct.toFixed(2)}%`) : [DASH])),
-      h("td", { class: cls }, ...(p ? level(p.tp1, p.tp2 != null ? fmtPrice(p.tp2) : null) : [DASH])),
-      h("td", { class: `${cls} hide-sm` }, ...(p ? size : [DASH])),
-      h("td", { class: "hide-sm" }, h("span", { class: "reason", text: thesis })),
-    );
-    if (!open) return [row];
-    return [row, h("tr", { class: "detail-row" }, h("td", { colspan: 8 }, h("div", { class: "scalp-detail" }, ...analystDetail(sig))))];
+        kv("Close by", fmtTime(p.exit_until))) : null,
+      x.notes && x.notes.length ? plainList(x.notes, "small muted") : null);
   }
 
   function renderAnalyst(res) {
     lastAnalyst = res;
-    const rows = $("analyst-rows");
+    const box = $("analyst-result");
     if (!res) {
-      rows.replaceChildren(h("tr", {}, h("td", { colspan: 8, class: "empty", text: "No AI analysis yet for this market and horizon. Press “Analyze with AI”." })));
+      box.replaceChildren(h("p", { class: "empty pad", text: `No AI analysis of ${analystToken} at ${analystHorizon} yet. Press “Analyze token with AI”.` }));
       $("analyst-meta").textContent = "";
       return;
     }
-    const c = res.counts;
+    const a = res.analysis || {};
     const u = res.usage || {};
-    $("analyst-meta").textContent = `${res.market} · ${res.holding.split(":")[0]} · ${res.trades} trade${res.trades === 1 ? "" : "s"}, ${c.WATCH} watch, `
-      + `${c["NO TRADE"]} no trade · ${Math.round(res.seconds)}s · ${(((u.prompt_tokens || 0) + (u.completion_tokens || 0)) / 1000).toFixed(0)}k tokens · ${fmtTime(res.generated_at)}`;
-    const err = $("analyst-error");
-    if (res.errors.length) setMessage(err, "Some coins could not be analysed", res.errors.slice(0, 5)); else err.hidden = true;
-    rows.replaceChildren(...(res.signals.length ? res.signals.flatMap(analystRows)
-      : [h("tr", {}, h("td", { colspan: 8, class: "empty", text: "No coins analysed (check Coins to analyse)." }))]));
+    $("analyst-meta").textContent = [res.model, res.seconds != null ? `${Math.round(res.seconds)}s` : null,
+      u.calls ? `${u.calls} AI call${u.calls > 1 ? "s" : ""} · ${(((u.prompt_tokens || 0) + (u.completion_tokens || 0)) / 1000).toFixed(0)}k tokens` : null,
+      fmtTime(res.generated_at)].filter(Boolean).join(" · ");
+    const parts = [
+      h("div", { class: "pad analyst-head" },
+        h("div", {}, h("strong", { class: "analyst-sym", text: res.symbol }), h("span", { class: "muted small", text: ` ${res.name || ""} · ${fmtPrice(res.price)} · ${res.holding || res.horizon}` })),
+        res.conviction != null ? h("div", { class: "analyst-conv" }, h("span", { class: "small muted", text: "Conviction " }),
+          h("strong", { text: `${res.conviction}/100` }), convictionBar(res.conviction)) : null),
+      h("div", { class: "market-panels pad" }, marketPanel(res, "spot"), marketPanel(res, "futures")),
+    ];
+    if (a.thesis || a.no_trade_reason) {
+      parts.push(h("div", { class: "pad strategy-box" },
+        h("strong", { class: "small", text: a.setup || (a.decision === "NO_TRADE" ? "No trade" : "AI view") }),
+        h("p", { class: "small", text: a.thesis || a.no_trade_reason }),
+        h("p", { class: "muted small", text: [a.bias ? `bias ${a.bias}` : null,
+          res.probability != null ? `estimated chance of TP1 before the stop ${Math.round(res.probability * 100)}%` : null,
+          a.invalidation ? `invalidation: ${a.invalidation}` : null].filter(Boolean).join(" · ") })));
+    }
+    const sections = [["Market", a.market_context], ["Trend and structure", a.trend_and_structure], ["Key levels", a.key_levels],
+      ["Positioning and flow", a.positioning_and_flow], ["News and catalysts", a.news_and_catalysts]].filter(([, t]) => t);
+    if (sections.length) parts.push(h("dl", { class: "detail-grid compact ai-reasoning pad" }, ...sections.map(([k, t]) => kv(k, t))));
+    const lists = [["For the trade", a.confluences], ["Risks", a.risks], ["Watch", a.what_to_watch]].filter(([, l]) => l && l.length);
+    if (lists.length) parts.push(h("div", { class: "pad ai-lists" }, ...lists.map(([t, items]) => h("div", {}, h("strong", { class: "small", text: t }), plainList(items, "small")))));
+    if (res.review) {
+      const r = res.review;
+      const tone = { approve: "good", reduce: "warning", reject: "critical" }[r.verdict] || "neutral";
+      parts.push(h("div", { class: "pad ai-review" }, h("strong", { class: "small" }, "Risk manager ", toneBadge(tone, humanize(r.verdict))),
+        h("p", { class: "small", text: r.summary }), r.issues && r.issues.length ? plainList(r.issues, "small") : null));
+    }
+    if (res.error || (res.notes && res.notes.length && !res.analysis)) {
+      parts.push(h("p", { class: "small pad muted", text: res.error || res.notes.join("; ") }));
+    }
+    box.replaceChildren(...parts);
+  }
+
+  function renderAnalystHistory(rows) {
+    const box = $("analyst-history");
+    if (!rows || !rows.length) {
+      box.hidden = true;
+      return;
+    }
+    box.replaceChildren(h("span", { class: "muted small", text: "Analysed: " }), ...rows.slice(0, 8).map((r) => {
+      const b = h("button", { type: "button", class: "ghost small", text: `${r.symbol} ${r.horizon} · ${humanize(r.spot)} / ${humanize(r.futures)}` });
+      b.addEventListener("click", () => { $("analyst-token").value = r.symbol; setAnalyst(r.symbol, r.horizon); });
+      return b;
+    }));
+    box.hidden = false;
   }
 
   async function refreshAnalyst() {
-    const key = analystKey();
+    const key = `${analystToken}:${analystHorizon}`;
     try {
-      const r = await getJSON(`/api/ai/analyst?market=${analystMarket}&horizon=${analystHorizon}`);
-      if (key !== analystKey()) return;
+      const r = await getJSON(`/api/ai/analyst?symbol=${encodeURIComponent(analystToken)}&horizon=${analystHorizon}`);
+      if (key !== `${analystToken}:${analystHorizon}`) return;
       renderAnalyst(r.result);
+      renderAnalystHistory(r.history);
       renderAnalystStatus(r.status);
       renderAnalystSettings(r.settings);
     } catch (err) {
-      if (key === analystKey()) setMessage($("analyst-error"), `AI analyst unavailable: ${err.message}`);
+      setMessage($("analyst-error"), `AI analyst unavailable: ${err.message}`);
     }
   }
 
-  function renderAnalystStatus(all) {
-    if (!all) return;
-    const st = all[analystKey()];
-    const anyRunning = Object.values(all).some((x) => x.running);
+  function renderAnalystStatus(st) {
+    if (!st) return;
     const button = $("analyst-scan");
-    button.disabled = anyRunning || emergency;
-    button.textContent = st && st.running ? "Analysing…" : "Analyze with AI";
+    button.disabled = !!st.running || emergency;
+    button.textContent = st.running ? "Analysing…" : "Analyze token with AI";
     let text = "";
-    if (st) {
-      if (st.running) {
-        const secs = st.started_at ? Math.round((Date.now() - new Date(st.started_at).getTime()) / 1000) : 0;
-        text = `The AI is analysing ${st.done}/${st.total || "?"} coins… ${secs}s`;
-      } else if (st.outcome === "stopped") text = `Stopped ${fmtTime(st.finished_at)}`;
-      else if (st.outcome === "failed") text = `Analysis failed: ${st.error || "unknown error"}`;
-    } else if (anyRunning) text = "Another AI analysis is running";
+    if (st.running) {
+      const secs = st.started_at ? Math.round((Date.now() - new Date(st.started_at).getTime()) / 1000) : 0;
+      text = `${st.symbol} ${st.horizon}: ${st.step || "working"}… ${secs}s`;
+    } else if (st.outcome === "failed") text = `AI analysis failed: ${st.error || "unknown error"}`;
+    else if (st.outcome === "stopped") text = `Stopped ${fmtTime(st.finished_at)}`;
     $("analyst-status").textContent = text;
-    $("analyst-progress").style.width = st && st.running && st.total ? `${Math.max(4, (st.done / st.total) * 100)}%` : "0%";
-    for (const [key, value] of Object.entries(all)) {
-      const seen = analystSeen[key];
-      if (value.finished_at && seen !== undefined && seen !== value.finished_at && key === analystKey()) {
+    $("analyst-progress").style.width = st.running ? (st.step && st.step.includes("risk") ? "75%" : st.step && st.step.includes("AI") ? "45%" : "15%") : "0%";
+    if (st.finished_at && analystSeen !== undefined && analystSeen !== st.finished_at) {
+      if (st.symbol && st.horizon && (st.symbol !== analystToken || st.horizon !== analystHorizon)) {
+        $("analyst-token").value = st.symbol;
+        setAnalyst(st.symbol, st.horizon);
+      } else {
         refreshAnalyst();
-        refreshRecord();
       }
-      analystSeen[key] = value.finished_at;
+      refreshRecord();
     }
+    analystSeen = st.finished_at || null;
   }
 
   let analystModelsLoaded = false;
@@ -2672,46 +2657,26 @@
     }
   }
 
-  function setAnalyst(market, horizon) {
-    analystMarket = market;
+  function setAnalyst(token, horizon) {
+    analystToken = token;
     analystHorizon = horizon;
-    pref("analystMarket", market);
+    pref("analystToken", token);
     pref("analystHorizon", horizon);
-    document.querySelectorAll("[data-amarket]").forEach((b) => b.setAttribute("aria-checked", b.dataset.amarket === market ? "true" : "false"));
     document.querySelectorAll("[data-ahorizon]").forEach((b) => b.setAttribute("aria-checked", b.dataset.ahorizon === horizon ? "true" : "false"));
-    analystOpen.clear();
     renderAnalyst(null);
     refreshAnalyst();
   }
 
   async function startAnalyst() {
-    const coins = $("selection-summary").textContent;
-    if (!window.confirm(`Signova AI will analyse ${coins} (${analystMarket}, ${analystHorizon}) with OpenAI. `
-      + "Each coin takes about a minute and uses your OpenAI credits. Start?")) return;
+    $("analyst-error").hidden = true;
     try {
-      const r = await api(`/api/ai/analyst/scan?market=${analystMarket}&horizon=${analystHorizon}`, { method: "POST" });
+      const r = await api(`/api/ai/analyst/token?symbol=${encodeURIComponent(analystToken)}&horizon=${analystHorizon}`, { method: "POST" });
       if (!r.started) $("analyst-status").textContent = "An AI analysis is already running.";
+      analystSeen = analystSeen === undefined ? null : analystSeen;
       renderAnalystStatus(r.status);
       scheduleControl(1000);
     } catch (err) {
       setMessage($("analyst-error"), `Could not start the AI analysis: ${err.message}`);
-    }
-  }
-
-  async function analyseCoin(symbol, button) {
-    button.disabled = true;
-    button.textContent = "The AI is thinking… (about a minute)";
-    try {
-      const result = await api("/api/ai/analyst/coin", { method: "POST", timeoutMs: 600000,
-        body: { symbol, market: analystMarket, horizon: analystHorizon } });
-      if (lastAnalyst) {
-        lastAnalyst.signals = lastAnalyst.signals.map((x) => (x.symbol === result.symbol ? result : x));
-        renderAnalyst(lastAnalyst);
-      }
-      refreshRecord();
-    } catch (err) {
-      button.disabled = false;
-      button.textContent = `Failed: ${err.message}`;
     }
   }
 
@@ -3353,11 +3318,11 @@
     setFuturesHorizon(["15m", "4h", "1d"].includes(savedFutures) ? savedFutures : "1h");
     $("futures-scan").addEventListener("click", startFutures);
     $("futures-lev").addEventListener("change", saveFuturesLeverage);
-    const savedMarket = pref("analystMarket");
     const savedAh = pref("analystHorizon");
-    document.querySelectorAll("[data-amarket]").forEach((b) => b.addEventListener("click", () => setAnalyst(b.dataset.amarket, analystHorizon)));
-    document.querySelectorAll("[data-ahorizon]").forEach((b) => b.addEventListener("click", () => setAnalyst(analystMarket, b.dataset.ahorizon)));
-    setAnalyst(savedMarket === "spot" ? "spot" : "futures", ["15m", "1h", "1d"].includes(savedAh) ? savedAh : "4h");
+    analystToken = pref("analystToken") || "BTC";
+    document.querySelectorAll("[data-ahorizon]").forEach((b) => b.addEventListener("click", () => setAnalyst(analystToken, b.dataset.ahorizon)));
+    $("analyst-token").addEventListener("change", () => setAnalyst($("analyst-token").value, analystHorizon));
+    setAnalyst(analystToken, ["15m", "1h", "1d"].includes(savedAh) ? savedAh : "4h");
     $("analyst-scan").addEventListener("click", startAnalyst);
     $("analyst-settings").addEventListener("toggle", () => { if ($("analyst-settings").open) loadAnalystModels(); });
     for (const id of ["analyst-model", "analyst-effort", "analyst-conv", "analyst-review", "analyst-quant"]) $(id).addEventListener("change", saveAnalystSettings);

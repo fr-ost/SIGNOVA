@@ -62,7 +62,7 @@ class Settings(BaseSettings):
 
     # --- application ---------------------------------------------------------
     app_name: str = "Signova"
-    app_version: str = "2.0.0-signova"
+    app_version: str = "2.1.0-signova"
     environment: Literal["development", "test", "production"] = "development"
     log_level: str = "INFO"
     json_logs: bool = True

@@ -366,9 +366,6 @@ async def futures_settings_update(body: FuturesSettingsIn, c: ContainerDep, _: A
 
 # ----------------------------------------------------------------------------- Signova AI analyst (phase 13)
 
-MarketQuery = Annotated[str, Query(pattern=r"^(spot|futures)$")]
-
-
 class AnalystSettingsIn(BaseModel):
     model: str | None = Field(default=None, min_length=1, max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
     effort: str | None = Field(default=None, pattern=r"^(low|medium|high)$")
@@ -377,50 +374,31 @@ class AnalystSettingsIn(BaseModel):
     use_quant: bool | None = None
 
 
-class AnalystCoinIn(BaseModel):
-    symbol: str = Field(min_length=1, max_length=15, pattern=r"^[A-Za-z0-9]+$")
-    market: str = Field(default="futures", pattern=r"^(spot|futures)$")
-    horizon: str = Field(default="4h", pattern=r"^(15m|1h|4h|1d)$")
+SymbolQuery = Annotated[str, Query(min_length=1, max_length=15, pattern=r"^[A-Za-z0-9]+$")]
 
 
-def _analyst_ready(c: Container) -> None:
+@router.post("/api/ai/analyst/token", tags=["ai"])
+async def analyst_token(c: ContainerDep, _: Admin, symbol: SymbolQuery, horizon: HorizonQuery = "4h") -> dict[str, Any]:
+    """The AI analyses ONE token for spot and futures (in the background: one AI call, plus a risk review
+    when it proposes a trade). Multi-coin scans use the rule engines, never the AI."""
     if c.kill.active:
         raise HTTPException(status_code=503, detail="emergency stop is engaged")
     if not c.analyst.configured:
         raise HTTPException(status_code=503, detail="OPENAI_API_KEY is not set on the server")
-
-
-@router.post("/api/ai/analyst/scan", tags=["ai"])
-async def analyst_scan(c: ContainerDep, _: Admin, market: MarketQuery = "futures", horizon: HorizonQuery = "4h") -> dict[str, Any]:
-    """The AI analyst reads every selected coin's full data and decides (in the background; minutes)."""
-    _analyst_ready(c)
-    started = c.analyst.start_scan(market, horizon)
+    universe = await c.universe.get()
+    asset = universe.find(symbol.upper())
+    if asset is None or not asset.supported:
+        raise HTTPException(status_code=404, detail=f"{symbol.upper()} is not in the analysed universe (add it to the watchlist)")
+    started = c.analyst.start_token(symbol, horizon)
     return {"started": started, "status": c.analyst.status()}
 
 
 @router.get("/api/ai/analyst", tags=["ai"])
-async def analyst_view(c: ContainerDep, market: MarketQuery = "futures", horizon: HorizonQuery = "4h") -> dict[str, Any]:
-    """The latest AI analyst scan for a market and horizon (never starts one)."""
-    return {"result": c.analyst.results.get(f"{market}:{horizon}"), "status": c.analyst.status(),
+async def analyst_view(c: ContainerDep, symbol: str | None = Query(default=None, pattern=r"^[A-Za-z0-9]+$"),
+                       horizon: str | None = Query(default=None, pattern=r"^(15m|1h|4h|1d)$")) -> dict[str, Any]:
+    """The AI analysis of a token (the latest one without a symbol); never starts one."""
+    return {"result": c.analyst.result(symbol, horizon), "history": c.analyst.history(), "status": c.analyst.status(),
             "settings": c.analyst.settings()}
-
-
-@router.post("/api/ai/analyst/coin", tags=["ai"])
-async def analyst_coin(body: AnalystCoinIn, c: ContainerDep, _: Admin) -> dict[str, Any]:
-    """Analyse one coin now (waits for the answer: often one to three minutes)."""
-    _analyst_ready(c)
-    universe = await c.universe.get()
-    asset = universe.find(body.symbol.upper())
-    if asset is None or not asset.supported:
-        raise HTTPException(status_code=404, detail=f"{body.symbol.upper()} is not in the analysed universe")
-    try:
-        result = await c.analyst.analyze(asset, body.market, body.horizon)
-    except ChatUnavailable as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.message) from None
-    scan = c.analyst.results.get(f"{body.market}:{body.horizon}")
-    if scan is not None:
-        scan["signals"] = [result if s["symbol"] == result["symbol"] else s for s in scan["signals"]]
-    return result
 
 
 @router.get("/api/ai/analyst/settings", tags=["ai"])

@@ -239,7 +239,7 @@ def board_view(board: dict[str, Any] | None) -> dict[str, Any] | None:
 class DossierInputs:
     symbol: str
     name: str
-    market: str  # spot | futures
+    market: str  # spot | futures | both (one decision serves spot and futures)
     horizon: str  # 15m | 1h | 4h | 1d
     now: datetime
     price: float
@@ -261,7 +261,8 @@ class DossierInputs:
     market_context: dict[str, Any] | None = None
     btc: dict[str, Any] | None = None  # Bitcoin's own view (for altcoins)
     quant: dict[str, Any] | None = None  # what the rule engines see, with their measured research
-    cost_pct: float = 0.2  # round trip
+    cost_pct: float = 0.2  # round trip (futures when market is "both")
+    spot_cost_pct: float | None = None  # round trip on spot, when market is "both"
     min_reward_risk: float = 1.5
     risk_per_trade_pct: float = 1.0
     max_leverage: int | None = None
@@ -274,11 +275,14 @@ def build_dossier(i: DossierInputs) -> dict[str, Any]:
             "market": i.market, "horizon": i.horizon, "holding": HOLD_TEXT[i.horizon],
             "max_hold_hours": MAX_HOLD_HOURS[i.horizon],
             "allowed_decisions": ["LONG", "NO_TRADE"] if i.market == "spot" else list(DECISIONS),
-            "round_trip_cost_pct": _num(i.cost_pct, 3),
+            "round_trip_cost_pct": ({"futures": _num(i.cost_pct, 3), "spot": _num(i.spot_cost_pct, 3)} if i.market == "both"
+                                    else _num(i.cost_pct, 3)),
+            **({"markets": "one decision for both: LONG = spot buy and futures long; SHORT = futures short only (no spot trade)"}
+               if i.market == "both" else {}),
             "min_net_reward_risk": i.min_reward_risk,
             "risk_per_trade_pct_of_equity": i.risk_per_trade_pct,
             **({"max_leverage": i.max_leverage, "note": "position size and leverage are computed by the dashboard from your stop"}
-               if i.market == "futures" else {}),
+               if i.market in ("futures", "both") else {}),
         },
         "coin": {
             "symbol": i.symbol, "name": i.name, "time_utc": _t(i.now), "price": _num(i.price),
@@ -346,6 +350,8 @@ Discipline:
 - Use only numbers from the DOSSIER. Every price you give must be consistent with the candles and
   levels in it. Never invent data.
 - Spot market: only LONG or NO_TRADE (describe a bearish view in no_trade_reason).
+- Market "both": one decision serves spot and perpetual futures. LONG means a spot buy and a futures
+  long with the same levels; SHORT is a futures short only. Judge the setup, not the market.
 - Keep every text field short and concrete (numbers, levels, timeframes).
 
 Answer with the JSON object only (the schema is enforced)."""
