@@ -112,67 +112,49 @@
 
     <section class="card ai-card" data-feature="analyst" aria-labelledby="analyst-title">
       <div class="card-head">
-        <h2 id="analyst-title"><svg class="feat-icon" aria-hidden="true"><use href="#i-brain"/></svg>Signova AI analyst</h2>
+        <h2 id="analyst-title"><svg class="feat-icon" aria-hidden="true"><use href="#i-brain"/></svg>Signova AI · single token</h2>
         <span id="analyst-meta" class="muted small"></span>
       </div>
-      <p class="muted small pad">OpenAI's best model on your key reads each selected coin like a senior trader: several timeframes
-        of candles, indicators, structure and levels, futures funding, open interest, long/short ratios and liquidations, order
-        flow, news, sentiment, the market and Bitcoin, and the rule engines' measured research. It decides long, short or no
-        trade with an exact plan; a second pass as an independent risk manager can lower or reject it. Signova then checks the
-        plan is executable and worth its costs, sizes it, and tracks every AI signal in the Track record so you can see whether
-        the AI really beats the rules. Takes about a minute per coin and uses your OpenAI credits.</p>
+      <p class="muted small pad">Pick one token. OpenAI's best model on your key reads everything Signova knows about it (charts on
+        several timeframes, structure and levels, futures funding, open interest, long/short ratios and liquidations, order
+        flow, news, the market and Bitcoin, and the engines' research) and gives a <strong>spot</strong> and a
+        <strong>futures</strong> signal in one analysis. A trade gets a second look from an independent AI risk manager.
+        One token costs one or two AI calls. Scans of many coins (Analyze now, Scalp and Futures cards) use the engines only
+        and never spend OpenAI credits.</p>
       <div class="control-row pad-row">
-        <div class="segmented" id="analyst-markets" role="radiogroup" aria-label="Market">
-          <button type="button" role="radio" data-amarket="futures" aria-checked="true">Futures</button>
-          <button type="button" role="radio" data-amarket="spot" aria-checked="false">Spot</button>
-        </div>
+        <label class="small inline-select">Token <select id="analyst-token" aria-label="Token to analyse with AI"></select></label>
         <div class="segmented" id="analyst-horizons" role="radiogroup" aria-label="AI horizon">
           <button type="button" role="radio" data-ahorizon="15m" aria-checked="false">15 min</button>
           <button type="button" role="radio" data-ahorizon="1h" aria-checked="false">1 hour</button>
           <button type="button" role="radio" data-ahorizon="4h" aria-checked="true">4 hours</button>
           <button type="button" role="radio" data-ahorizon="1d" aria-checked="false">1 day</button>
         </div>
-        <button id="analyst-scan" type="button" class="primary">Analyze with AI</button>
+        <button id="analyst-scan" type="button" class="primary">Analyze token with AI</button>
         <span id="analyst-status" class="muted small" aria-live="polite"></span>
       </div>
+      <div id="analyst-history" class="history-chips pad-row" hidden></div>
       <details id="analyst-settings" class="research pad">
         <summary><strong class="small">AI settings</strong> <span id="analyst-settings-meta" class="muted small"></span></summary>
         <div class="control-row analyst-settings">
           <label class="small inline-select">Model <select id="analyst-model"><option value="auto">Best available (auto)</option></select></label>
           <label class="small inline-select">Thinking
-            <select id="analyst-effort"><option value="high">High (most careful)</option><option value="medium">Medium</option><option value="low">Low (fastest)</option></select>
+            <select id="analyst-effort"><option value="high">High (most careful)</option><option value="medium">Medium</option><option value="low">Low (fastest, cheapest)</option></select>
           </label>
           <label class="small inline-select">Minimum conviction
             <select id="analyst-conv"><option>55</option><option>60</option><option>65</option><option>70</option><option>75</option><option>80</option></select>
           </label>
-          <label class="toggle small"><input id="analyst-review" type="checkbox"> Risk-manager second opinion</label>
-          <label class="toggle small"><input id="analyst-quant" type="checkbox"> Give the AI the rule engines' research</label>
+          <label class="toggle small"><input id="analyst-review" type="checkbox"> Risk-manager second opinion (one more call on trades)</label>
+          <label class="toggle small"><input id="analyst-quant" type="checkbox"> Include the engines' latest research</label>
         </div>
       </details>
       <div class="progress inset" aria-hidden="true"><span id="analyst-progress"></span></div>
       <div id="analyst-error" class="alert inset" role="alert" hidden></div>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Coin</th>
-              <th>AI signal</th>
-              <th class="num">Conviction</th>
-              <th class="num">Entry</th>
-              <th class="num">Stop</th>
-              <th class="num">TP1 / TP2</th>
-              <th class="num hide-sm">Size</th>
-              <th class="hide-sm">Thesis</th>
-            </tr>
-          </thead>
-          <tbody id="analyst-rows">
-            <tr><td colspan="8" class="empty">Choose a market and horizon, then press “Analyze with AI”. Select the coins first (Coins to analyse): each coin is one careful AI analysis.</td></tr>
-          </tbody>
-        </table>
+      <div id="analyst-result" class="analyst-result">
+        <p class="empty pad">Choose a token and a horizon, then press “Analyze token with AI” (about a minute).</p>
       </div>
       <div class="card-foot small muted">
         An AI model can be wrong, confident and persuasive at the same time. Nothing here is guaranteed: the Track record
-        (“AI futures 4h”, “AI spot 1h”…) is the only honest measure of its accuracy. Start with small sizes.
+        (“AI spot 4h”, “AI futures 4h”…) is the only honest measure of its accuracy. Start with small sizes.
       </div>
     </section>
 
@@ -513,7 +495,7 @@
               <option value="filter">filter (a reject caps a buy at WATCH)</option>
             </select>
           </label>
-          <label class="toggle"><input id="ai-auto" type="checkbox"> Auto-review new buys (up to 3 per scan)</label>
+          <label class="toggle" hidden><input id="ai-auto" type="checkbox"> Auto-review new buys (off: engine scans never call OpenAI)</label>
         </div>
         <form id="chat-form" class="chat-form">
           <div class="chat-options">

@@ -126,7 +126,8 @@ def _openai(calls: list):
                        "confluences": ["trend", "level"], "risks": ["BTC weakness"], "invalidation": "close below the stop",
                        "what_to_watch": ["volume"], "no_trade_reason": None}
             if dossier["coin"]["symbol"] == "SOL":
-                content |= {"decision": "NO_TRADE", "no_trade_reason": "middle of the range"}
+                content |= {"decision": "SHORT", "bias": "bearish", "stop_loss": price + 2 * atr,
+                            "take_profit_1": price - 3 * atr, "take_profit_2": price - 6 * atr}
         usage = {"prompt_tokens": 9000, "completion_tokens": 3000, "completion_tokens_details": {"reasoning_tokens": 2500}}
         return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(content)}, "finish_reason": "stop"}],
                                          "usage": usage})
@@ -135,57 +136,61 @@ def _openai(calls: list):
 
 
 @pytest.mark.parametrize("env", [{"openai_api_key": "sk-test"}], indirect=True)
-async def test_ai_analyst_scan_end_to_end(env):  # noqa: F811
+async def test_single_token_ai_analysis_spot_and_futures(env):  # noqa: F811
     http, c, sessions, _ = env
     calls: list = []
     c.chat._http = httpx.AsyncClient(transport=httpx.MockTransport(_openai(calls)))
-    await http.put("/api/control/selection", json={"mode": "selected", "symbols": ["BTC", "ETH", "SOL"]})
-    r = await http.post("/api/ai/analyst/scan", params={"market": "futures", "horizon": "1h"})
+    # multi-coin AI scans are gone: the engines do those
+    assert (await http.post("/api/ai/analyst/scan", params={"market": "futures", "horizon": "1h"})).status_code in (404, 405)
+    r = await http.post("/api/ai/analyst/token", params={"symbol": "eth", "horizon": "1h"})
     assert r.status_code == 200 and r.json()["started"] is True
+    assert (await http.post("/api/ai/analyst/token", params={"symbol": "BTC", "horizon": "1h"})).json()["started"] is False  # one at a time
     await c.analyst.wait()
-    body = (await http.get("/api/ai/analyst", params={"market": "futures", "horizon": "1h"})).json()
-    assert body["status"]["futures:1h"]["outcome"] == "completed", body["status"]
+    body = (await http.get("/api/ai/analyst", params={"symbol": "ETH", "horizon": "1h"})).json()
+    assert body["status"]["outcome"] == "completed", body["status"]
     res = body["result"]
-    assert c.futures.results.get("1h") is not None  # the rule engines' research ran first and was shown to the AI
-    by = {s["symbol"]: s for s in res["signals"]}
-    assert set(by) == {"BTC", "ETH", "SOL"}
-    eth = by["ETH"]
-    assert eth["label"] in ("LONG", "STRONG LONG") and eth["model"] == "gpt-5.1" and eth["side"] == "long"
-    assert eth["leverage"]["liquidation_price"] < eth["plan"]["stop"] < eth["plan"]["entry"]
-    assert eth["review"]["verdict"] == "approve" and eth["usage"]["calls"] == 2
-    assert by["SOL"]["signal"] == "NO TRADE" and "range" in by["SOL"]["notes"][0]
+    assert res["symbol"] == "ETH" and res["model"] == "gpt-5.1" and res["usage"]["calls"] == 2  # one analysis + one risk review
+    fut, spot = res["futures"], res["spot"]
+    assert fut["label"] in ("LONG", "STRONG LONG") and spot["label"] in ("BUY", "STRONG BUY")
+    assert fut["leverage"]["liquidation_price"] < fut["plan"]["stop"] < fut["plan"]["entry"]
+    assert spot["sizing"]["allocation_pct"] > 0 and spot["cost_pct"] > fut["cost_pct"] - 0.2
+    assert res["review"]["verdict"] == "approve"
+    assert body["history"][0]["symbol"] == "ETH"
     first = calls[0]
     assert first["model"] == "gpt-5.1" and first["reasoning_effort"] == "high"
     assert first["response_format"]["json_schema"]["strict"] is True
     dossier = json.loads(first["messages"][1]["content"].split("DOSSIER:\n", 1)[1])
-    assert dossier["task"]["market"] == "futures" and [t["timeframe"] for t in dossier["timeframes"]] == ["15m", "1H", "4H", "1D"]
+    assert dossier["task"]["market"] == "both" and set(dossier["task"]["round_trip_cost_pct"]) == {"spot", "futures"}
+    assert [t["timeframe"] for t in dossier["timeframes"]] == ["15m", "1H", "4H", "1D"]
     assert len(dossier["timeframes"][0]["candles"]["rows"]) == 72 and "structure" in dossier["timeframes"][1]
-    assert dossier["rule_engines"]["research_best_first"]
     async with sessions() as s:
-        rows = (await s.execute(select(Signal).where(Signal.strategy == "ai_futures_1h"))).scalars().all()
-        assert {r.symbol for r in rows} >= {"ETH"} and all(r.status == "OPEN" for r in rows)
-        eth_row = next(r for r in rows if r.symbol == "ETH")
-        assert eth_row.quant_output["entry_type"] == "market" and eth_row.model_name == "gpt-5.1"
-    # a second scan does not store the same open trade twice
-    c.analyst.start_scan("futures", "1h")
+        rows = (await s.execute(select(Signal).where(Signal.symbol == "ETH", Signal.strategy.like("ai_%")))).scalars().all()
+        assert {r.strategy for r in rows} == {"ai_spot_1h", "ai_futures_1h"} and all(r.status == "OPEN" for r in rows)
+        fut_row = next(r for r in rows if r.strategy == "ai_futures_1h")
+        assert fut_row.quant_output["entry_type"] == "market" and fut_row.model_name == "gpt-5.1"
+    # the same token again does not store the open trades twice
+    assert c.analyst.start_token("ETH", "1h")
     await c.analyst.wait()
     async with sessions() as s:
-        again = (await s.execute(select(Signal).where(Signal.strategy == "ai_futures_1h", Signal.symbol == "ETH"))).scalars().all()
-        assert len(again) == 1
-    # the track record follows it: a later rally hits the targets
+        again = (await s.execute(select(Signal).where(Signal.symbol == "ETH", Signal.strategy.like("ai_%")))).scalars().all()
+        assert len(again) == 2
+    # a short: futures only, spot has no trade
+    assert c.analyst.start_token("SOL", "1h")
+    await c.analyst.wait()
+    sol = c.analyst.result("SOL", "1h")
+    assert sol["futures"]["label"] in ("SHORT", "STRONG SHORT") and sol["spot"]["signal"] == "NO TRADE"
+    assert "spot cannot be shorted" in sol["spot"]["notes"][0]
+    # the track record follows the futures long: a later rally hits the targets
     tracker = OutcomeTracker(sessions)
-    plan = eth["plan"]
-    t = eth_row.created_at.replace(tzinfo=UTC) - timedelta(minutes=15)
+    plan = fut["plan"]
+    t = fut_row.created_at.replace(tzinfo=UTC) - timedelta(minutes=15)
     t = t - timedelta(minutes=t.minute % 15, seconds=t.second, microseconds=t.microsecond)
     e, tp2 = plan["entry"], plan["tp2"]
     candles = [bar(k, e, e * 1.001, e * 0.999, e, Timeframe.M15, t) for k in range(2)]
     candles += [bar(2, e, tp2 * 1.01, e * 0.999, tp2, Timeframe.M15, t)]
-    assert await tracker.update("ETH", {Timeframe.M15: candles}) == 1
-    async with sessions() as s:
-        row = (await s.execute(select(Signal).where(Signal.id == eth_row.id))).scalar_one()
-        assert row.status == "WIN"
+    assert await tracker.update("ETH", {Timeframe.M15: candles}) == 2  # the spot buy and the futures long
     perf = (await http.get("/api/performance")).json()
-    assert "AI futures 1h" in json.dumps(perf)
+    assert "AI futures 1h" in json.dumps(perf) and "AI spot 1h" in json.dumps(perf)
 
 
 @pytest.mark.parametrize("env", [{"openai_api_key": "sk-test"}], indirect=True)
@@ -198,12 +203,12 @@ async def test_ai_analyst_settings_models_and_emergency_stop(env):  # noqa: F811
     models = (await http.get("/api/ai/analyst/models")).json()
     assert models["order"][0] == "gpt-5.1"
     await http.post("/api/control/kill")
-    assert (await http.post("/api/ai/analyst/scan", params={"market": "spot", "horizon": "4h"})).status_code == 503
-    assert (await http.get("/api/ai/analyst", params={"market": "spot", "horizon": "4h"})).status_code == 200
+    assert (await http.post("/api/ai/analyst/token", params={"symbol": "ETH", "horizon": "4h"})).status_code == 503
+    assert (await http.get("/api/ai/analyst", params={"symbol": "ETH", "horizon": "4h"})).status_code == 200
     await http.post("/api/control/resume")
 
 
 async def test_ai_analyst_needs_an_openai_key(env):  # noqa: F811
     http, _, _, _ = env
-    r = await http.post("/api/ai/analyst/scan", params={"market": "spot", "horizon": "4h"})
+    r = await http.post("/api/ai/analyst/token", params={"symbol": "ETH", "horizon": "4h"})
     assert r.status_code == 503 and "OPENAI_API_KEY" in r.json()["detail"]

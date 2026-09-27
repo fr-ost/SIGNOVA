@@ -768,3 +768,16 @@ tr.chosen td { background: color-mix(in srgb, var(--f-lab) 8%, var(--surface)); 
 .analyst-settings { flex-wrap: wrap; gap: 10px 16px; padding-top: 8px; }
 .ai-reasoning dd { font-variant-numeric: normal; }
 .ai-reasoning .kv { grid-column: 1 / -1; }
+.analyst-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; }
+.analyst-sym { font-size: 20px; }
+.analyst-conv { display: flex; align-items: center; gap: 8px; }
+.analyst-conv .conv-bar { width: 120px; margin: 0; }
+.market-panels { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }
+.market-panel { border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; background: var(--surface); min-width: 0; }
+.market-panel.is-trade { border-color: color-mix(in srgb, var(--good) 45%, var(--border)); }
+.market-panel-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+.market-panel .detail-grid { padding: 4px 0 6px; }
+.market-panel .plain-list { margin: 4px 0 0; }
+.history-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.ai-lists { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px 16px; }
+#analyst-token { min-width: 96px; }

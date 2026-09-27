@@ -422,7 +422,7 @@ async def test_ai_review_is_stored_with_the_signal_and_counted_in_the_track_reco
 
 
 @pytest.mark.parametrize("env", [{"openai_api_key": "sk-test"}], indirect=True)
-async def test_auto_review_after_scans_and_the_emergency_stop(env):
+async def test_engine_scans_never_call_openai_and_the_emergency_stop(env):
     http, c, _, _ = env
     calls: list = []
     c.chat._http = httpx.AsyncClient(transport=httpx.MockTransport(openai_review("caution", calls)))
@@ -432,8 +432,7 @@ async def test_auto_review_after_scans_and_the_emergency_stop(env):
     assert c.ai_review.schedule_auto([("scalp", "ETH", "1h", result["signals"][0])]) is False  # auto is off
     await http.put("/api/ai/settings", json={"auto": True, "auto_max": 2})
     c.scalp.after_scan("1h", result)
-    await c.ai_review._auto_task
-    assert len(calls) == 2 and [s.get("ai_review", {}).get("verdict") for s in result["signals"]][:3] == ["caution", "caution", None]
+    assert c.ai_review._auto_task is None and calls == []  # Signova: engine scans never call OpenAI
     await http.post("/api/control/kill")
     assert (await http.post("/api/ai/review", json={"kind": "scalp", "symbol": "ETH", "horizon": "1h"})).status_code == 503
     assert c.ai_review.schedule_auto([("scalp", "ETH", "1h", result["signals"][0])]) is False

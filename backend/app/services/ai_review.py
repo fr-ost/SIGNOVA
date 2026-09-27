@@ -141,14 +141,9 @@ class AIReviewService:
         self.on_review: Callable[[dict[str, Any]], None] | None = None  # applies a verdict to the shown signal
 
     def schedule_auto(self, items: list[tuple[str, str, str, dict[str, Any]]]) -> bool:
-        """Review a few new buy signals in the background (kind, symbol, horizon, signal)."""
-        if not self.auto or not self._chat.configured or self._blocked() or not items:
-            return False
-        if self._auto_task is not None and not self._auto_task.done():
-            return False
-        self._stopping = False
-        self._auto_task = asyncio.create_task(self._auto(items[: self.auto_max]), name="ai-auto-review")
-        return True
+        """Signova: engine scans never call OpenAI (credits are spent only on request, one token or one signal
+        at a time), so automatic reviews after a scan are off."""
+        return False
 
     async def _auto(self, items: list[tuple[str, str, str, dict[str, Any]]]) -> None:
         for kind, symbol, horizon, signal in items:

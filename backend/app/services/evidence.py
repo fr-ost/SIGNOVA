@@ -108,11 +108,14 @@ class EvidenceService:
 
     # ------------------------------------------------------------------ before a scan
 
-    async def prepare(self, symbols: Sequence[str]) -> None:
-        """Refresh the shared inputs once per scan (never fails the scan)."""
-        if self.mode == "off" or self._blocked():
+    async def prepare(self, symbols: Sequence[str], *, ai: bool = False) -> None:
+        """Refresh the shared inputs once per scan (never fails the scan). The AI reads the headlines only
+        for a single-token AI analysis (`ai=True`); multi-coin engine scans never call OpenAI."""
+        if self._blocked():
             return
-        jobs: list[Any] = [self._refresh_news(symbols), self._count_mentions()]
+        if self.mode == "off" and not ai:
+            return
+        jobs: list[Any] = [self._refresh_news(symbols, ai=ai), self._count_mentions()]
         if self.learner is not None:
             jobs.append(self.learner.refresh())
         if self.derivatives.enabled:
@@ -121,15 +124,15 @@ class EvidenceService:
             if isinstance(result, Exception):
                 log.warning("evidence preparation step failed", extra={"error": f"{type(result).__name__}: {result}"})
 
-    async def _refresh_news(self, symbols: Sequence[str]) -> None:
+    async def _refresh_news(self, symbols: Sequence[str], *, ai: bool = False) -> None:
         if self._news is None:
             return
         digest = self._news.cached()
         stale = digest is None or (utcnow() - digest.fetched_at) > timedelta(minutes=self._s.evidence_news_max_age_minutes)
         if stale and self.refresh_news:
             digest = await self._news.digest(force=digest is not None)
-        if digest is not None and self.ai_news is not None and self.ai_news.available:
-            self._ai = await self.ai_news.read(digest.items)  # every tagged coin: one reading serves all scans
+        if ai and digest is not None and self.ai_news is not None and self.ai_news.available:
+            self._ai = await self.ai_news.read(digest.items, list(symbols))  # every tagged coin: one reading serves all scans
 
     async def _count_mentions(self) -> None:
         if self._mentions is not None and time.monotonic() - self._mentions[0] < 900:

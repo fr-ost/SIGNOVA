@@ -324,13 +324,16 @@ Trailing and indicator exits are followed the same way by the track record (the 
 stored with each signal), and the plan tells you how to manage the trade ("trail: stop at the
 lowest low of the last 20 candles, raise it after each candle").
 
-## Signova AI analyst (Phase 13)
+## Signova AI analyst (Phase 13): one token at a time
 
-The **Signova AI analyst** card (top of the page) asks an OpenAI model to analyse each selected coin
-the way an experienced discretionary trader would, instead of relying on fixed equations. Choose the
-market (futures: long or short; spot: buy or no trade), the horizon (15 minutes to 1 day) and press
-**Analyze with AI**. It takes about a minute per coin (high reasoning effort) and uses your
-`OPENAI_API_KEY` credits; nothing runs on its own.
+The **Signova AI · single token** card (top of the page) spends OpenAI credits only when you ask, and
+only on one token. Pick the token and the horizon (15 minutes to 1 day) and press **Analyze token with
+AI**. One analysis gives both a **spot** signal (buy or no trade) and a **futures** signal (long, short or
+no trade): a single AI call, plus one risk-manager call when it proposes a trade (about a minute).
+
+Multi-coin scans (Analyze now, the Scalp and Futures cards) use the rule engines only and never call
+OpenAI: the AI news reading before scans and the automatic AI review after scans are off. The per-signal
+**AI review** button still works on request.
 
 **What the AI reads** (one JSON dossier per coin, about 15-25k tokens):
 - 2-4 timeframes of candles (up to 90 per timeframe, with the taker-buy share of volume), and for each:
@@ -344,10 +347,11 @@ market (futures: long or short; spot: buy or no trade), the horizon (15 minutes 
 - the coin's headlines with the AI news reading, sentiment, scheduled unlocks, market headlines;
 - the market backdrop (Bitcoin trend and RSI, breadth, fear & greed, market-wide funding, altcoin
   season) and Bitcoin's own 4H and 1D charts;
-- what the rule engines see on this coin and their measured walk-forward research (the futures
-  engine runs first when its result is older than 90 minutes).
+- what the rule engines see on this coin and their measured walk-forward research, when a Futures scan
+  at this horizon ran in the last 3 hours (press Find futures trades first to include it; free).
 
-**How it decides:** the prompt describes a top-down professional process (market, higher timeframe,
+**How it decides:** one decision serves both markets (LONG = spot buy and futures long with the same
+levels; SHORT = futures short only, spot shows no trade). The prompt describes a top-down professional process (market, higher timeframe,
 setup, positioning and liquidity, news, the measured research), strict discipline (no trade is the
 usual answer; conviction 80+ only when everything agrees) and a plan with a stop beyond the level that
 proves the idea wrong. The answer is enforced by a JSON schema (OpenAI Structured Outputs): decision,
@@ -377,8 +381,7 @@ only once the price fills them (an order that expires or whose move leaves witho
 NOFILL and not counted). After a few weeks the Track record shows whether the AI beats the rule
 engines on your coins. An LLM can be wrong with confidence: size small until it has a record.
 
-`POST /api/ai/analyst/scan?market=futures&horizon=4h` (token), `GET /api/ai/analyst?market=futures&horizon=4h`,
-`POST /api/ai/analyst/coin` (`{"symbol": "ETH", "market": "futures", "horizon": "4h"}`, token),
+`POST /api/ai/analyst/token?symbol=ETH&horizon=4h` (token), `GET /api/ai/analyst?symbol=ETH&horizon=4h`,
 `GET/PUT /api/ai/analyst/settings`, `GET /api/ai/analyst/models` (token).
 
 ## Futures signals (Phase 12)
@@ -777,9 +780,9 @@ Without `ADMIN_TOKEN`, anyone who finds the URL can use those controls.
 | `POST /api/scalp/scan?horizon=15m\|1h\|4h` (token) | Scalp scan of the selected coins, in the background |
 | `GET /api/scalp?horizon=1h` | Latest scalp scan (signals, per-coin backtest, pooled record) and scan status |
 | `GET /api/scalp/{symbol}?horizon=1h` (token) | Scalp analysis of one coin now |
-| `POST /api/ai/analyst/scan?market=spot\|futures&horizon=4h` (token) | Phase 13: the AI analyst analyses the selected coins (background, about a minute per coin) |
-| `GET /api/ai/analyst?market=futures&horizon=4h` | Phase 13: latest AI analysis (decisions, plans, reasoning, risk-manager verdicts, token usage) |
-| `POST /api/ai/analyst/coin`, `GET/PUT /api/ai/analyst/settings`, `GET /api/ai/analyst/models` | Phase 13: one coin now (token), settings (PUT: token), the models your key can use (token) |
+| `POST /api/ai/analyst/token?symbol=ETH&horizon=4h` (token) | Phase 13: AI analysis of one token, spot and futures (background, about a minute) |
+| `GET /api/ai/analyst?symbol=ETH&horizon=4h` | Phase 13: that token's AI analysis (the latest one without a symbol) and the tokens analysed |
+| `GET/PUT /api/ai/analyst/settings`, `GET /api/ai/analyst/models` | Phase 13: settings (PUT: token), the models your key can use (token) |
 | `POST /api/futures/scan?horizon=15m\|1h\|4h\|1d` (token) | Phase 12: futures scan (long and short) of the selected coins, in the background |
 | `GET /api/futures?horizon=4h` | Phase 12: latest futures scan (signals with leverage plans, research for both sides) and scan status |
 | `GET/PUT /api/futures/settings` (PUT: token) | Phase 12: leverage cap, futures fee, slippage, maintenance margin |
@@ -874,7 +877,7 @@ Portfolio > Risk settings, which are stored in the database and take precedence.
 | `FUTURES_ENABLED` / `FUTURES_MAX_LEVERAGE` | true / 5 | Phase 12 futures signals, leverage cap for the plans (1-20) |
 | `FUTURES_FEE_PCT` / `FUTURES_SLIPPAGE_PCT` / `FUTURES_MAINTENANCE_MARGIN_PCT` | 0.05 / 0.02 / 1.0 | futures costs per side, maintenance margin for the liquidation estimate |
 | `AI_ANALYST_MODEL` / `AI_ANALYST_EFFORT` | auto / high | Phase 13 model (auto = best on your key) and reasoning effort |
-| `AI_ANALYST_REVIEW` / `AI_ANALYST_MIN_CONVICTION` / `AI_ANALYST_MIN_REWARD_RISK` / `AI_ANALYST_CONCURRENCY` | true / 60 / 1.5 / 2 | risk-manager pass, plan checks, coins analysed at once |
+| `AI_ANALYST_REVIEW` / `AI_ANALYST_MIN_CONVICTION` / `AI_ANALYST_MIN_REWARD_RISK` / `AI_ANALYST_CONCURRENCY` | true / 60 / 1.5 / 2 | risk-manager pass, plan checks (concurrency is unused since single-token mode) |
 | `REGIME_CACHE_SECONDS` | 600 | market regime refresh |
 | `CANDLE_FETCH_LIMIT` / `CANDLE_FETCH_LIMIT_LONG` | 500 / 1000 | candles per request (5m-1H / 4H-1D) |
 | `SIGNAL_PERSIST_ENABLED` / `FEATURE_PERSIST_TIMEFRAMES` | true / 1h,4h,1d | history storage |
@@ -931,7 +934,7 @@ a validated strategy producing a BUY with its exit rule stored and followed by t
 Phase 13: best-model choice from the key's model list, defensive parsing of the model's answer,
 every plan check (spot cannot short, stop too tight, reward too small, low conviction, price past the
 stop, limit orders), the risk manager only lowering, limit and stop entries counting once filled
-(NOFILL otherwise), and a full scan against a fake OpenAI that answers from the dossier: the dossier's
+(NOFILL otherwise), and a single-token analysis (spot and futures from one call) against a fake OpenAI that answers from the dossier, engine scans never calling OpenAI: the dossier's
 content, Structured Outputs and reasoning effort in the request, storage without duplicates, a tracked
 win, settings, the model list, the emergency stop and a missing key.
 Phase 12: the candle mirror (a downtrend becomes an uptrend), shorts found in a falling market and
